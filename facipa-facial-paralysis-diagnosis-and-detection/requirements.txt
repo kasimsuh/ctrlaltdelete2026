@@ -1,6 +1,0 @@
-Flask>=2.3,<4
-numpy>=1.23,<3
-opencv-python>=4.8
-imutils>=0.5.4
-dlib>=19.24
-
