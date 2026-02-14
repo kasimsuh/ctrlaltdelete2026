@@ -2,12 +2,32 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
+import ssl
+import sys
+import os
 from typing import Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+import pymongo
+
+from app.db import mongo_check
+from app.auth import (
+    authenticate_user,
+    create_access_token,
+    create_user,
+    ensure_user_indexes,
+    require_current_user,
+)
+
+# Load env from repo root (or backend/) when running locally.
+_backend_dir = Path(__file__).resolve().parent.parent  # backend/
+load_dotenv(_backend_dir / ".env", override=False)
+load_dotenv(_backend_dir.parent / ".env", override=False)
 
 app = FastAPI(title="Guardian Check-In API", version="0.1.0")
 
@@ -140,6 +160,33 @@ class AlertResponse(BaseModel):
 class HealthStatus(BaseModel):
     status: str = Field(default="ok")
     time: datetime
+    mongo: str = Field(default="unknown")
+    mongo_host: Optional[str] = None
+    mongo_db: Optional[str] = None
+    mongo_error: Optional[str] = None
+    python: str = Field(default_factory=lambda: sys.version.split()[0])
+    ssl: str = Field(default_factory=lambda: getattr(ssl, "OPENSSL_VERSION", "unknown"))
+    pymongo: str = Field(default_factory=lambda: getattr(pymongo, "__version__", "unknown"))
+    auth_required: bool = Field(default=False)
+    jwt_configured: bool = Field(default=False)
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class MeResponse(BaseModel):
+    email: str
 
 
 CHECKINS: Dict[str, Dict[str, object]] = {}
@@ -151,7 +198,44 @@ WEEKLY_SUMMARIES: Dict[str, List[WeeklySummary]] = {}
 
 @app.get("/health", response_model=HealthStatus)
 def health_check() -> HealthStatus:
-    return HealthStatus(time=datetime.utcnow())
+    ok, summary, err = mongo_check()
+    return HealthStatus(
+        time=datetime.utcnow(),
+        mongo="ok" if ok else "error",
+        mongo_host=summary.get("host"),
+        mongo_db=summary.get("db"),
+        mongo_error=err,
+        auth_required=(os.environ.get("REQUIRE_AUTH", "false").strip().lower() in {"1", "true", "yes", "on"}),
+        jwt_configured=bool(os.environ.get("JWT_SECRET")),
+    )
+
+@app.on_event("startup")
+def _startup() -> None:
+    # Ensure indexes when Mongo is reachable (Atlas/local).
+    try:
+        ensure_user_indexes()
+    except Exception:
+        pass
+
+
+@app.post("/auth/register", response_model=MeResponse)
+def register(payload: RegisterRequest) -> MeResponse:
+    user = create_user(email=payload.email.strip().lower(), password=payload.password)
+    return MeResponse(email=user["email"])
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(payload: LoginRequest) -> TokenResponse:
+    user = authenticate_user(email=payload.email.strip().lower(), password=payload.password)
+    token = create_access_token(sub=str(user["_id"]), email=user["email"])
+    return TokenResponse(access_token=token)
+
+
+@app.get("/me", response_model=MeResponse)
+def me(user: Optional[dict] = Depends(require_current_user)) -> MeResponse:
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return MeResponse(email=user["email"])
 
 
 @app.post("/checkins/start", response_model=CheckinStartResponse)
