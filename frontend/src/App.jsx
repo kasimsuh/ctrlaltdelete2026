@@ -6,11 +6,14 @@ const modelName = "gemini-2.5-flash-native-audio-preview-12-2025";
 const systemInstruction = `ROLE: You are a professional Medical Screening Assistant.
 OBJECTIVE: Conduct a brief well-being check by asking specific questions.
 RULES:
-1. Greet the user and ask: "How are you feeling today?"
-2. Follow up with: "Are you experiencing any dizziness, chest pain, or trouble breathing?"
-3. Finally ask: "Did you take your morning medications?"
-4. STRICT: Only ask these questions. If the user tries to change the subject, politely redirect them back to the screening.
-5. TERMINATION: Once all questions are answered, say exactly: "Thank you for your responses. The screening is now complete. Goodbye."`;
+1. First ask the user to look at their camera for 10 seconds and wait for a "camera done" signal.
+2. Then ask: "How are you feeling today?"
+3. Follow up with: "Are you experiencing any dizziness, chest pain, or trouble breathing?"
+4. Finally ask: "Did you take your morning medications?"
+5. STRICT: Only ask these questions. If the user tries to change the subject, politely redirect them back to the screening.
+6. TERMINATION: Once all questions are answered, say exactly: "Thank you for your responses. The screening is now complete. Goodbye."`;
+
+const cameraDurationMs = 10000;
 
 const statusColor = {
   Green: "bg-emerald-100 text-moss",
@@ -103,11 +106,15 @@ export default function App() {
   const [voiceStatus, setVoiceStatus] = useState("Idle");
   const [voiceLog, setVoiceLog] = useState([]);
   const [isVoiceLive, setIsVoiceLive] = useState(false);
+  const [cameraStatus, setCameraStatus] = useState("Idle");
 
   const sessionRef = useRef(null);
   const audioContextRef = useRef(null);
   const processorRef = useRef(null);
   const micStreamRef = useRef(null);
+  const cameraStreamRef = useRef(null);
+  const cameraVideoRef = useRef(null);
+  const checkinIdRef = useRef(null);
   const isSessionOpenRef = useRef(false);
   const audioQueueRef = useRef([]);
   const isPlayingRef = useRef(false);
@@ -200,6 +207,13 @@ export default function App() {
       micStreamRef.current.getTracks().forEach((track) => track.stop());
       micStreamRef.current = null;
     }
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.srcObject = null;
+    }
     if (audioContextRef.current) {
       await audioContextRef.current.close();
       audioContextRef.current = null;
@@ -222,6 +236,7 @@ export default function App() {
       session_id: `screening_${Date.now()}`,
       timestamp: new Date().toISOString(),
       senior_id: "demo-senior",
+      checkin_id: checkinIdRef.current,
       responses: responsesRef.current
     };
 
@@ -230,6 +245,60 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(screeningData)
     });
+  };
+
+  const captureCameraClip = async () => {
+    setCameraStatus("Recording 10s...");
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    cameraStreamRef.current = stream;
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.srcObject = stream;
+    }
+    const preferredType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
+      ? "video/webm;codecs=vp8"
+      : "video/webm";
+    const recorder = new MediaRecorder(stream, preferredType ? { mimeType: preferredType } : undefined);
+    const chunks = [];
+
+    return await new Promise((resolve, reject) => {
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+      recorder.onerror = (event) => {
+        setCameraStatus("Error");
+        reject(event.error || new Error("Camera recording failed"));
+      };
+      recorder.onstop = () => {
+        if (cameraStreamRef.current) {
+          cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+          cameraStreamRef.current = null;
+        }
+        if (cameraVideoRef.current) {
+          cameraVideoRef.current.srcObject = null;
+        }
+        setCameraStatus("Recorded");
+        resolve(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
+      };
+      recorder.start();
+      setTimeout(() => recorder.stop(), cameraDurationMs);
+    });
+  };
+
+  const uploadCameraClip = async (checkinId, videoBlob) => {
+    setCameraStatus("Uploading...");
+    const formData = new FormData();
+    formData.append("video", videoBlob, "checkin.webm");
+    formData.append("metadata", JSON.stringify({ duration_ms: cameraDurationMs }));
+    const response = await fetch(`${apiBase}/checkins/${checkinId}/upload`, {
+      method: "POST",
+      body: formData
+    });
+    if (!response.ok) {
+      throw new Error("Failed to upload camera clip");
+    }
+    setCameraStatus("Uploaded");
   };
 
   const playQueuedAudio = () => {
@@ -258,6 +327,17 @@ export default function App() {
     setVoiceLog([]);
 
     try {
+      const checkinResponse = await fetch(`${apiBase}/checkins/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ demo_mode: isDemoMode, senior_id: "demo-senior" })
+      });
+      if (!checkinResponse.ok) {
+        throw new Error("Failed to start check-in");
+      }
+      const checkinData = await checkinResponse.json();
+      checkinIdRef.current = checkinData.checkin_id;
+
       const tokenResponse = await fetch(`${apiBase}/auth/ephemeral`, { method: "POST" });
       if (!tokenResponse.ok) {
         throw new Error("Failed to fetch ephemeral token");
@@ -287,8 +367,9 @@ export default function App() {
                   lastAiAudioAtRef.current = Date.now();
                   if (!lastAiBurstAtRef.current || Date.now() - lastAiBurstAtRef.current > 1000) {
                     aiTurnCountRef.current += 1;
-                    currentQuestionIndexRef.current = Math.min(aiTurnCountRef.current - 1, responsesRef.current.length - 1);
-                    console.log("[Live AI] Turn", aiTurnCountRef.current);
+                    const questionIndex = Math.max(0, Math.min(aiTurnCountRef.current - 2, responsesRef.current.length - 1));
+                    currentQuestionIndexRef.current = questionIndex;
+                    console.log("[Live AI] Turn", aiTurnCountRef.current, "Question index", questionIndex);
                   }
                   lastAiBurstAtRef.current = Date.now();
                   heardAudioRef.current = true;
@@ -328,6 +409,26 @@ export default function App() {
       isSessionOpenRef.current = true;
       setVoiceStatus("Listening...");
       voiceStartAtRef.current = Date.now();
+
+      if (!audioContextRef.current) {
+        const audioContext = new AudioContext();
+        audioContextRef.current = audioContext;
+        if (audioContext.state === "suspended") {
+          await audioContext.resume();
+        }
+      }
+
+      session.sendRealtimeInput({
+        text: "Please ask the user to look at their camera for 10 seconds and wait for my 'camera done' signal before asking questions."
+      });
+
+      try {
+        const videoBlob = await captureCameraClip();
+        await uploadCameraClip(checkinIdRef.current, videoBlob);
+      } catch (error) {
+        setCameraStatus("Error");
+        setVoiceLog((prev) => [...prev, error?.message || "Camera capture failed."]);
+      }
 
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SpeechRecognition) {
@@ -382,10 +483,9 @@ export default function App() {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         micStreamRef.current = stream;
 
-        const audioContext = new AudioContext();
-        audioContextRef.current = audioContext;
-        if (audioContext.state === "suspended") {
-          await audioContext.resume();
+        const audioContext = audioContextRef.current;
+        if (!audioContext) {
+          throw new Error("Audio context missing");
         }
 
         const source = audioContext.createMediaStreamSource(stream);
@@ -435,7 +535,7 @@ export default function App() {
             return;
           }
           session.sendRealtimeInput({
-            text: "Please start the screening with your greeting."
+            text: "Camera done. Begin the screening questions now."
           });
         }, 200);
       } catch (error) {
@@ -490,39 +590,49 @@ export default function App() {
           <p className="mt-3 text-sm text-stone-600">{reason}</p>
         </section>
 
-        <section className="grid gap-5 md:grid-cols-2">
-          <article className="rounded-2xl border border-amber-100 bg-white p-6 shadow-card">
-            <h3 className="text-lg font-semibold">Camera</h3>
-            <p className="mt-2 text-sm text-stone-600">Capture placeholder for MVP.</p>
-            <button className="mt-4 rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700">
-              Simulate capture
-            </button>
-          </article>
-          <article className="rounded-2xl border border-amber-100 bg-white p-6 shadow-card">
-            <h3 className="text-lg font-semibold">Voice Q&amp;A (Live)</h3>
-            <p className="mt-2 text-sm text-stone-600">
-              {isVoiceLive ? `Status: ${voiceStatus}` : "Start the live voice assistant in-browser."}
-            </p>
-            <div className="mt-4 flex flex-wrap gap-3">
-              <button
-                className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
-                onClick={startVoice}
-                disabled={isVoiceLive}
-              >
-                Start voice
-              </button>
-              <button
-                className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
-                onClick={stopVoice}
-                disabled={!isVoiceLive}
-              >
-                Stop
-              </button>
+        <section className="rounded-2xl border border-amber-100 bg-white p-6 shadow-card">
+          <div className="flex flex-col gap-6 lg:flex-row">
+            <div className="w-full lg:w-1/2">
+              <h3 className="text-lg font-semibold">Camera + Voice Check-In</h3>
+              <p className="mt-2 text-sm text-stone-600">
+                {isVoiceLive ? `Voice status: ${voiceStatus}` : "Start the live voice assistant to begin."}
+              </p>
+              <p className="mt-1 text-xs text-stone-500">Camera status: {cameraStatus}</p>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
+                  onClick={startVoice}
+                  disabled={isVoiceLive}
+                >
+                  Start session
+                </button>
+                <button
+                  className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
+                  onClick={stopVoice}
+                  disabled={!isVoiceLive}
+                >
+                  Stop
+                </button>
+              </div>
+              <div className="mt-4 max-h-40 overflow-auto rounded-lg bg-amber-50/60 p-3 text-xs text-stone-700">
+                {voiceLog.length === 0 ? "No messages yet." : voiceLog.join("\n\n")}
+              </div>
             </div>
-            <div className="mt-4 max-h-40 overflow-auto rounded-lg bg-amber-50/60 p-3 text-xs text-stone-700">
-              {voiceLog.length === 0 ? "No messages yet." : voiceLog.join("\n\n")}
+            <div className="w-full lg:w-1/2">
+              <div className="aspect-video overflow-hidden rounded-2xl border border-amber-100 bg-amber-50/50">
+                <video
+                  ref={cameraVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="h-full w-full object-cover"
+                />
+              </div>
+              <p className="mt-2 text-xs text-stone-500">
+                The camera preview appears while the 10s recording is in progress.
+              </p>
             </div>
-          </article>
+          </div>
         </section>
       </main>
     </div>

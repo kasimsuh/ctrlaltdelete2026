@@ -155,6 +155,7 @@ class ScreeningResponseItem(BaseModel):
 class ScreeningSession(BaseModel):
     session_id: str
     senior_id: str
+    checkin_id: Optional[str] = None
     timestamp: datetime
     responses: List[ScreeningResponseItem]
 
@@ -162,6 +163,7 @@ class ScreeningSession(BaseModel):
 class ScreeningCreateRequest(BaseModel):
     session_id: Optional[str] = None
     senior_id: str = "demo-senior"
+    checkin_id: Optional[str] = None
     timestamp: Optional[datetime] = None
     responses: List[ScreeningResponseItem]
 
@@ -392,6 +394,7 @@ def create_screening(payload: ScreeningCreateRequest) -> ScreeningCreateResponse
     session = ScreeningSession(
         session_id=session_id,
         senior_id=payload.senior_id,
+        checkin_id=payload.checkin_id,
         timestamp=timestamp,
         responses=payload.responses,
     )
