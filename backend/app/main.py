@@ -15,6 +15,19 @@ from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+from app.auth import (
+    require_current_user,
+    ensure_user_indexes,
+    create_user,
+    authenticate_user,
+    create_access_token,
+)
+
+from app.db import mongo_check
+
+# Ensure backend/.env is loaded regardless of launch directory.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
 app = FastAPI(title="Guardian Check-In API", version="0.1.0")
 
 app.add_middleware(
@@ -183,9 +196,12 @@ class HealthStatus(BaseModel):
     mongo_error: Optional[str] = None
     python: str = Field(default_factory=lambda: sys.version.split()[0])
     ssl: str = Field(default_factory=lambda: getattr(ssl, "OPENSSL_VERSION", "unknown"))
-    pymongo: str = Field(default_factory=lambda: getattr(pymongo, "__version__", "unknown"))
+    pymongo: str = Field(
+        default_factory=lambda: getattr(pymongo, "__version__", "unknown")
+    )
     auth_required: bool = Field(default=False)
     jwt_configured: bool = Field(default=False)
+
 
 class RegisterRequest(BaseModel):
     email: str
@@ -228,9 +244,13 @@ def health_check() -> HealthStatus:
         mongo_host=summary.get("host"),
         mongo_db=summary.get("db"),
         mongo_error=err,
-        auth_required=(os.environ.get("REQUIRE_AUTH", "false").strip().lower() in {"1", "true", "yes", "on"}),
+        auth_required=(
+            os.environ.get("REQUIRE_AUTH", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        ),
         jwt_configured=bool(os.environ.get("JWT_SECRET")),
     )
+
 
 @app.on_event("startup")
 def _startup() -> None:
@@ -249,7 +269,9 @@ def register(payload: RegisterRequest) -> MeResponse:
 
 @app.post("/auth/login", response_model=TokenResponse)
 def login(payload: LoginRequest) -> TokenResponse:
-    user = authenticate_user(email=payload.email.strip().lower(), password=payload.password)
+    user = authenticate_user(
+        email=payload.email.strip().lower(), password=payload.password
+    )
     token = create_access_token(sub=str(user["_id"]), email=user["email"])
     return TokenResponse(access_token=token)
 
@@ -273,15 +295,23 @@ def create_ephemeral_token() -> EphemeralTokenResponse:
     )
 
     now = datetime.now(timezone.utc)
-    token = client.auth_tokens.create(
-        config={
-            "uses": 1,
-            "expire_time": now + timedelta(minutes=30),
-            "new_session_expire_time": now + timedelta(minutes=5),
-        }
-    )
+    try:
+        token = client.auth_tokens.create(
+            config={
+                "uses": 1,
+                "expire_time": now + timedelta(minutes=30),
+                "new_session_expire_time": now + timedelta(minutes=5),
+            }
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to create Gemini ephemeral token: {exc.__class__.__name__}",
+        ) from exc
 
-    return EphemeralTokenResponse(token=token.name, expires_at=now + timedelta(minutes=30))
+    return EphemeralTokenResponse(
+        token=token.name, expires_at=now + timedelta(minutes=30)
+    )
 
 
 @app.post("/checkins/start", response_model=CheckinStartResponse)
@@ -371,7 +401,9 @@ def get_checkin(checkin_id: str) -> CheckinDetail:
 
 
 @app.get("/seniors/{senior_id}/checkins", response_model=CheckinListResponse)
-def list_checkins(senior_id: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> CheckinListResponse:
+def list_checkins(
+    senior_id: str, from_date: Optional[str] = None, to_date: Optional[str] = None
+) -> CheckinListResponse:
     items: List[CheckinDetail] = []
 
     for checkin_id, checkin in CHECKINS.items():
@@ -401,7 +433,9 @@ def get_baseline(senior_id: str) -> BaselineResponse:
 
 
 @app.post("/seniors/{senior_id}/summaries/weekly", response_model=WeeklySummaryResponse)
-def create_weekly_summary(senior_id: str, payload: WeeklySummaryRequest) -> WeeklySummaryResponse:
+def create_weekly_summary(
+    senior_id: str, payload: WeeklySummaryRequest
+) -> WeeklySummaryResponse:
     week_start = payload.week_start or datetime.utcnow().strftime("%Y-%m-%d")
     week_end = payload.week_start or datetime.utcnow().strftime("%Y-%m-%d")
     summary = WeeklySummary(
@@ -418,7 +452,9 @@ def create_weekly_summary(senior_id: str, payload: WeeklySummaryRequest) -> Week
 
 
 @app.get("/seniors/{senior_id}/summaries/weekly", response_model=WeeklySummaryResponse)
-def get_weekly_summary(senior_id: str, week_start: Optional[str] = None) -> WeeklySummaryResponse:
+def get_weekly_summary(
+    senior_id: str, week_start: Optional[str] = None
+) -> WeeklySummaryResponse:
     summaries = WEEKLY_SUMMARIES.get(senior_id, [])
     if not summaries:
         raise HTTPException(status_code=404, detail="No weekly summaries available")
