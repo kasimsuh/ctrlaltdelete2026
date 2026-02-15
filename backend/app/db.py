@@ -112,11 +112,18 @@ def get_senior_users(limit: int = 50) -> list[dict]:
 
 
 def get_latest_checkins(user_ids: list) -> dict:
+    """Get the most recent completed check-in for each user."""
     if not user_ids:
         return {}
     db = get_database()
     pipeline = [
-        {"$match": {"user_id": {"$in": user_ids}}},
+        {
+            "$match": {
+                "user_id": {"$in": user_ids},
+                "status": "completed",
+                "triage_status": {"$ne": None}  # Exclude incomplete check-ins
+            }
+        },
         {"$sort": {"completed_at": -1}},
         {
             "$group": {
@@ -133,20 +140,59 @@ def get_latest_checkins(user_ids: list) -> dict:
 
 
 def get_dashboard_analytics(days: int = 7) -> dict:
+    """
+    Get dashboard analytics showing the most recent triage status per senior.
+    
+    This counts each senior only once based on their latest check-in status,
+    rather than accumulating all check-ins within the time window.
+    """
     db = get_database()
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    
+    # Get all seniors
+    senior_users = list(db["users"].find({"role": "senior"}, {"_id": 1}))
+    senior_ids = [user["_id"] for user in senior_users]
+    
+    if not senior_ids:
+        return {
+            "total_seniors": 0,
+            "total_checkins": 0,
+            "green": 0,
+            "yellow": 0,
+            "red": 0,
+            "alerts": 0,
+            "window_days": days
+        }
+    
+    # Get the most recent check-in for each senior within the time window
     pipeline = [
-        {"$match": {"completed_at": {"$gte": cutoff}}},
-        {"$group": {"_id": "$triage_status", "count": {"$sum": 1}}}
+        {
+            "$match": {
+                "user_id": {"$in": senior_ids},
+                "completed_at": {"$gte": cutoff},
+                "triage_status": {"$ne": None}  # Exclude null triage statuses
+            }
+        },
+        {"$sort": {"completed_at": -1}},
+        {
+            "$group": {
+                "_id": "$user_id",
+                "latest_status": {"$first": "$triage_status"},
+                "latest_completed_at": {"$first": "$completed_at"}
+            }
+        }
     ]
+    
     triage_counts = {"green": 0, "yellow": 0, "red": 0}
+    total_checkins = 0
+    
     for row in db["checkin_history"].aggregate(pipeline):
-        status = (row.get("_id") or "").lower()
+        status = (row.get("latest_status") or "").lower()
         if status in triage_counts:
-            triage_counts[status] = row.get("count", 0)
+            triage_counts[status] += 1
+        total_checkins += 1
 
-    senior_count = db["users"].count_documents({"role": "senior"})
-    total_checkins = sum(triage_counts.values())
+    senior_count = len(senior_users)
     alerts = triage_counts["yellow"] + triage_counts["red"]
 
     return {

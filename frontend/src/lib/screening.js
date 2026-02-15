@@ -18,7 +18,7 @@ export const completionPhrase =
 export const statusColor = {
   Green: "bg-emerald-100 text-moss",
   Yellow: "bg-amber-100 text-gold",
-  Red: "bg-rose-100 text-rose",
+  Red: "bg-red-100 text-rose",
   Error: "bg-rose-100 text-rose",
   neutral: "bg-amber-50 text-stone-600",
 };
