@@ -60,11 +60,26 @@ class FacialSymmetryResult(BaseModel):
     error: Optional[str] = None
 
 
+class HeartRateResult(BaseModel):
+    """Video-based heart rate analysis result."""
+
+    avg_hr_bpm: Optional[float] = None
+    hr_quality: str = "low"  # low, medium, high
+    usable_seconds: Optional[float] = None
+    bpm_series: List[float] = Field(default_factory=list)
+    sqi: Optional[float] = None  # Signal Quality Index
+    engine: str = "open-rppg"
+    note: Optional[str] = None
+    timing_ms: Optional[Dict[str, float]] = None
+    upload_mb: Optional[float] = None
+
+
 class CheckinUploadResponse(BaseModel):
     checkin_id: str
     uploaded_at: datetime
     files: List[str]
     facial_symmetry: Optional[FacialSymmetryResult] = None
+    heart_rate: Optional[HeartRateResult] = None
 
 
 class CheckinDetail(BaseModel):
@@ -77,6 +92,7 @@ class CheckinDetail(BaseModel):
     triage_reasons: List[str] = []
     transcript: Optional[str] = None
     facial_symmetry: Optional[FacialSymmetryResult] = None
+    heart_rate: Optional[HeartRateResult] = None
 
 
 class CheckinListResponse(BaseModel):

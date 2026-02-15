@@ -18,6 +18,7 @@ from app.models.checkin import (
     CheckinUploadResponse,
     CheckinDetail,
     FacialSymmetryResult,
+    HeartRateResult,
     TriageStatus,
 )
 from app.models.screening import ScreeningResponseItem
@@ -27,6 +28,7 @@ from app.services.facial_symmetry import (
     build_facial_symmetry_metrics,
 )
 from app.services.screening import build_screening_transcript
+from app.vhr import analyze_uploaded_video
 
 router = APIRouter()
 
@@ -163,6 +165,9 @@ def _load_checkin(checkin_id: str) -> Optional[Dict[str, object]]:
 
     if doc.get("facial_symmetry_raw"):
         checkin["facial_symmetry"] = doc.get("facial_symmetry_raw")
+    
+    if doc.get("heart_rate_raw"):
+        checkin["heart_rate"] = doc.get("heart_rate_raw")
 
     CHECKINS[checkin_id] = checkin
     return checkin
@@ -250,6 +255,7 @@ def start_checkin(
         "screening_responses": [],
         "metrics": {},
         "facial_symmetry_raw": None,
+        "heart_rate_raw": None,
         "user_message": None,
         "clinician_notes": None,
         "alert_level": None,
@@ -271,27 +277,49 @@ def start_checkin(
 
 
 @router.post("/{checkin_id}/upload", response_model=CheckinUploadResponse)
-def upload_checkin_artifacts(
+async def upload_checkin_artifacts(
     checkin_id: str,
     video: Optional[UploadFile] = File(default=None),
     audio: Optional[UploadFile] = File(default=None),
     frames: Optional[List[UploadFile]] = File(default=None),
     metadata: Optional[str] = Form(default=None),
 ) -> CheckinUploadResponse:
-    """Upload video/audio artifacts for a check-in."""
+    """Upload video/audio artifacts for a check-in, analyze facial symmetry and heart rate."""
     checkin = _load_checkin(checkin_id)
     if not checkin:
         raise HTTPException(status_code=404, detail="Check-in not found")
 
     files: List[str] = []
     facial_symmetry: Optional[FacialSymmetryResult] = None
+    heart_rate: Optional[HeartRateResult] = None
     duration_ms = _parse_duration_ms(metadata)
 
     if video is not None:
         files.append(video.filename or "video")
-        video_bytes = video.file.read()
+        
+        # Read video once for both analyses
+        video_bytes = await video.read()
+        
+        # Run facial symmetry analysis
         facial_symmetry = run_facial_symmetry_analysis(video_bytes, duration_ms)
         checkin["facial_symmetry"] = facial_symmetry.model_dump()
+        
+        # Run VHR analysis (requires re-uploading since it's async)
+        # Reset video position for VHR analysis
+        await video.seek(0)
+        try:
+            vhr_result = await analyze_uploaded_video(video)
+            heart_rate = HeartRateResult(**vhr_result)
+            checkin["heart_rate"] = heart_rate.model_dump()
+        except Exception as e:
+            # VHR analysis is optional, don't fail the entire upload
+            heart_rate = HeartRateResult(
+                avg_hr_bpm=None,
+                hr_quality="low",
+                note=f"VHR analysis failed: {str(e)}",
+            )
+            checkin["heart_rate"] = heart_rate.model_dump()
+    
     if audio is not None:
         files.append(audio.filename or "audio")
     if frames:
@@ -302,22 +330,33 @@ def upload_checkin_artifacts(
 
     CHECKIN_UPLOADS[checkin_id] = files
 
+    # Update database with both facial symmetry and heart rate
+    update_doc = {}
     if facial_symmetry is not None:
         metrics_payload = build_facial_symmetry_metrics(facial_symmetry)
+        update_doc["metrics.facial_symmetry"] = metrics_payload
+        update_doc["facial_symmetry_raw"] = facial_symmetry.model_dump()
+    
+    if heart_rate is not None:
+        update_doc["heart_rate_raw"] = heart_rate.model_dump()
+        update_doc["metrics.heart_rate"] = {
+            "avg_hr_bpm": heart_rate.avg_hr_bpm,
+            "hr_quality": heart_rate.hr_quality,
+            "sqi": heart_rate.sqi,
+        }
+    
+    if update_doc:
         get_checkins_collection().update_one(
             {"checkin_id": checkin_id},
-            {
-                "$set": {
-                    "metrics.facial_symmetry": metrics_payload,
-                    "facial_symmetry_raw": facial_symmetry.model_dump(),
-                }
-            },
+            {"$set": update_doc},
         )
+    
     return CheckinUploadResponse(
         checkin_id=checkin_id,
         uploaded_at=datetime.utcnow(),
         files=files,
         facial_symmetry=facial_symmetry,
+        heart_rate=heart_rate,
     )
 
 
@@ -557,4 +596,5 @@ def get_checkin(checkin_id: str) -> CheckinDetail:
         triage_reasons=checkin.get("triage_reasons", []),
         transcript=checkin.get("transcript"),
         facial_symmetry=checkin.get("facial_symmetry"),
+        heart_rate=checkin.get("heart_rate"),
     )

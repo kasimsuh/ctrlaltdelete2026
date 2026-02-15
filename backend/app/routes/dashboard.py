@@ -50,6 +50,16 @@ def dashboard_seniors(user: Optional[dict] = Depends(require_current_user)):
     response_items = []
     for senior in seniors:
         last_checkin = latest_checkins.get(senior["_id"])
+        
+        # Extract heart rate if available
+        heart_rate_data = None
+        if last_checkin and last_checkin.get("heart_rate_raw"):
+            hr_raw = last_checkin.get("heart_rate_raw")
+            heart_rate_data = {
+                "avg_hr_bpm": hr_raw.get("avg_hr_bpm"),
+                "hr_quality": hr_raw.get("hr_quality", "low"),
+            }
+        
         item = {
             "id": str(senior["_id"]),
             "firstName": senior.get("firstName", ""),
@@ -64,13 +74,17 @@ def dashboard_seniors(user: Optional[dict] = Depends(require_current_user)):
                 last_checkin.get("triage_status") if last_checkin else None
             ),
             "checkinId": (last_checkin.get("checkin_id") if last_checkin else None),
+            "heartRate": heart_rate_data,
         }
         response_items.append(item)
         if last_checkin:
+            hr_info = ""
+            if heart_rate_data and heart_rate_data.get("avg_hr_bpm"):
+                hr_info = f" | HR: {heart_rate_data['avg_hr_bpm']} bpm ({heart_rate_data['hr_quality']})"
             print(
                 f"  {senior.get('firstName')} {senior.get('lastName')}: "
                 f"{last_checkin.get('triage_status')} "
-                f"(completed: {last_checkin.get('completed_at')})"
+                f"(completed: {last_checkin.get('completed_at')}){hr_info}"
             )
 
     print(f"[DASHBOARD] Returning {len(response_items)} seniors")

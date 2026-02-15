@@ -70,6 +70,7 @@ def _checkin_detail_from_doc(doc: dict) -> CheckinDetail:
         triage_reasons=doc.get("triage_reasons", []),
         transcript=doc.get("transcript"),
         facial_symmetry=doc.get("facial_symmetry_raw"),
+        heart_rate=doc.get("heart_rate_raw"),
     )
 
 

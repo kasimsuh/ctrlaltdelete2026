@@ -19,6 +19,7 @@ from app.models.checkin import (
     CheckinListResponse,
     FacialSymmetrySummary,
     FacialSymmetryResult,
+    HeartRateResult,
 )
 from app.models.screening import (
     ScreeningResponseItem,
@@ -64,6 +65,7 @@ __all__ = [
     "CheckinListResponse",
     "FacialSymmetrySummary",
     "FacialSymmetryResult",
+    "HeartRateResult",
     # Screening
     "ScreeningResponseItem",
     "ScreeningSession",

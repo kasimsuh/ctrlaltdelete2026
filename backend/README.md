@@ -11,6 +11,21 @@ uvicorn app.main:app --reload --port 8000
 
 The API will be available at http://localhost:8000.
 
+## Video HR (VHR)
+
+`POST /checkins/{checkin_id}/upload` now analyzes the uploaded `video` file
+with the backend VHR module (`app/vhr`) and returns HR output in `vhr`:
+
+- `avg_hr_bpm`
+- `hr_quality`
+- `usable_seconds`
+- `bpm_series`
+- `engine`
+- optional `sqi`, `note`, `timing_ms`, `upload_mb`
+
+Additional VHR dependencies are listed in `backend/requirements.txt`.
+For stable browser video preprocessing, install `ffmpeg`/`ffprobe` on the host.
+
 ## MongoDB (local docker-compose)
 
 This repo includes a `docker-compose.yml` that starts MongoDB with authentication enabled and creates an app user on first run.
