@@ -1,41 +1,87 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import useCheckin from "../hooks/useCheckin.js";
+import { cameraDurationMs, statusColor } from "../lib/screening.js";
 import CompletionScreen from "./checkin/CompletionScreen.jsx";
 
-const CAMERA_DONE_STATUSES = new Set(["Recorded", "Uploading...", "Error"]);
-const FACE_CAPTURE_MS = 10000;
 const PAGE_SHELL_CLASS =
   "min-h-screen bg-[#f3f0ea] px-3 py-2 text-[#1d1b19] sm:px-4 sm:py-3";
 
-function HeaderBar({ authUser, logout }) {
-  const displayName =
-    [authUser?.firstName, authUser?.lastName]
-      .filter(Boolean)
-      .join(" ")
-      .trim() || "there";
+const FACE_CAPTURE_MS = cameraDurationMs;
+const CAMERA_DONE_STATUSES = new Set(["Uploaded", "Error"]);
 
+function HeaderBar({ authUser, logout }) {
   return (
-    <div className="flex items-center justify-between rounded-full border border-[#e8e2d8] bg-[#f7f7f7] px-4 py-2 text-sm text-stone-700">
-      <div className="flex items-center gap-2.5">
-        <img
-          src="/senicarelogo.png"
-          alt="SeniCare logo"
-          className="h-8 w-8 rounded-full object-cover"
-        />
-        <span className="text-base font-medium">
-          <span className="font-semibold text-stone-900">Welcome,</span>{" "}
-          {displayName}!
-        </span>
+    <header className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-[22px] border border-[#e8e2d8] bg-[#f7f7f7] px-5 py-4 shadow-[0_14px_28px_rgba(44,39,34,0.08)] sm:mt-4 sm:px-6">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.26em] text-[#9b6a52]">
+          Guardian Check-In
+        </p>
+        <p className="mt-1 text-sm text-stone-700">
+          Signed in as{" "}
+          <span className="font-semibold">
+            {authUser?.firstName} {authUser?.lastName}
+          </span>
+        </p>
       </div>
       <button
         type="button"
         onClick={logout}
-        className="rounded-full bg-[#171513] px-4 py-2 text-sm font-semibold text-white transition hover:bg-stone-800"
+        className="rounded-full bg-stone-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-stone-800"
       >
         Log out
       </button>
+    </header>
+  );
+}
+
+function Mascot() {
+  return (
+    <div className="grid h-full w-full place-items-center">
+      <div className="relative h-44 w-44">
+        <div className="absolute inset-0 rounded-full bg-gradient-to-br from-[#f2d4bf] via-[#f4e2d5] to-[#f7f7f7]" />
+        <div className="absolute left-6 top-7 h-20 w-20 rounded-full bg-[#f7f7f7] shadow-[0_10px_18px_rgba(60,45,36,0.08)]" />
+        <div className="absolute right-8 top-10 h-16 w-16 rounded-full bg-[#f7f7f7] shadow-[0_10px_18px_rgba(60,45,36,0.08)]" />
+        <div className="absolute bottom-7 left-1/2 h-14 w-28 -translate-x-1/2 rounded-[999px] bg-[#e46535]/15 shadow-inner" />
+        <div className="absolute bottom-11 left-1/2 h-2 w-10 -translate-x-1/2 rounded-full bg-[#e46535]" />
+      </div>
     </div>
+  );
+}
+
+function ProgressRing({ percent }) {
+  const radius = 30;
+  const stroke = 6;
+  const normalizedRadius = radius - stroke * 0.5;
+  const circumference = normalizedRadius * 2 * Math.PI;
+  const offset = circumference - (Math.min(100, Math.max(0, percent)) / 100) * circumference;
+
+  return (
+    <svg
+      width={(radius + stroke) * 2}
+      height={(radius + stroke) * 2}
+      className="text-[#e46535]"
+    >
+      <circle
+        stroke="rgba(148, 163, 184, 0.35)"
+        fill="transparent"
+        strokeWidth={stroke}
+        r={normalizedRadius}
+        cx={radius + stroke}
+        cy={radius + stroke}
+      />
+      <circle
+        stroke="currentColor"
+        fill="transparent"
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={`${circumference} ${circumference}`}
+        strokeDashoffset={offset}
+        r={normalizedRadius}
+        cx={radius + stroke}
+        cy={radius + stroke}
+      />
+    </svg>
   );
 }
 
@@ -47,19 +93,11 @@ function HeroStage({
   timerDone,
   isFaceScanActive,
 }) {
-  const showVideoPlaceholder = !showMascot && !isFaceScanActive;
-
   return (
-    <div className="w-full rounded-[22px] border border-[#e8e2d8] bg-[#f7f7f7] p-3 shadow-[0_12px_24px_rgba(44,39,34,0.08)] sm:p-4">
-      <div className="relative aspect-video overflow-hidden rounded-2xl border border-[#ddd3c6] bg-[#ece7de]">
-        {showMascot ? (
-          <div className="grid h-full w-full place-items-center bg-[radial-gradient(circle_at_top,_#f8efe1_0%,_#efe4d3_100%)] p-6">
-            <img
-              src="/senicarelogo.png"
-              alt="SeniCare mascot"
-              className="h-full max-h-64 w-auto rounded-2xl object-contain shadow-[0_10px_20px_rgba(44,39,34,0.12)]"
-            />
-          </div>
+    <div className="w-full overflow-hidden rounded-[28px] border border-[#e8e2d8] bg-[#1f1a17] shadow-[0_18px_36px_rgba(44,39,34,0.18)]">
+      <div className="relative aspect-video w-full">
+        {showMascot || !isRunning ? (
+          <Mascot />
         ) : (
           <video
             ref={cameraVideoRef}
@@ -69,30 +107,27 @@ function HeroStage({
             className="h-full w-full object-cover"
           />
         )}
-        {showVideoPlaceholder ? (
-          <div className="absolute inset-0 grid place-items-center bg-[radial-gradient(circle_at_top,_#f8efe1_0%,_#efe4d3_100%)] p-6">
-            <img
-              src="/senicarelogo.png"
-              alt="SeniCare logo"
-              className="h-full max-h-64 w-auto rounded-2xl object-contain shadow-[0_10px_20px_rgba(44,39,34,0.12)]"
-            />
-          </div>
-        ) : null}
+
         {isRunning ? (
-          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[rgba(26,23,20,0.65)] to-transparent p-4">
-            <div className="h-2.5 w-full overflow-hidden rounded-full bg-[#f0e6d8]">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-[#e46535] to-[#d8542a] transition-[width] duration-100 ease-linear"
-                style={{ width: `${progressPercent}%` }}
-              />
+          <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-3 bg-gradient-to-t from-black/60 via-black/25 to-transparent px-5 py-4 text-[#fff6e8]">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#f8e7d3]/80">
+                Face scan
+              </p>
+              <p className="mt-1 text-sm font-medium">
+                {timerDone
+                  ? "Finishing analysis..."
+                  : isFaceScanActive
+                    ? "Analyzing face data for 10 seconds..."
+                    : "Waiting for camera..."}
+              </p>
             </div>
-            <p className="mt-2 text-xs font-medium text-[#fff6e8]">
-              {timerDone
-                ? "Finishing analysis..."
-                : isFaceScanActive
-                  ? "Analyzing face data for 10 seconds..."
-                  : "Loading Questions ..."}
-            </p>
+            <div className="flex items-center gap-3">
+              <ProgressRing percent={progressPercent} />
+              <p className="text-sm font-semibold tabular-nums">
+                {progressPercent}%
+              </p>
+            </div>
           </div>
         ) : null}
       </div>
@@ -132,14 +167,21 @@ function ActionRow({
 
 export default function SeniorCheckin({ authUser, authToken, logout }) {
   const {
+    status,
+    reason,
     isVoiceLive,
     isCheckinComplete,
+    voiceStatus,
+    voiceLog,
     cameraStatus,
+    facialSymmetryStatus,
+    facialSymmetryReason,
     cameraVideoRef,
     startVoice,
     stopVoice,
   } = useCheckin(authUser, authToken);
-  const [phase, setPhase] = useState("idle");
+
+  const [phase, setPhase] = useState("idle"); // idle | running | mascot | complete
   const [elapsedMs, setElapsedMs] = useState(0);
   const [timerDone, setTimerDone] = useState(false);
   const [isStartLocked, setIsStartLocked] = useState(false);
@@ -176,10 +218,7 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
     clearRunTimers();
     intervalRef.current = window.setInterval(() => {
       if (!runStartAtRef.current) return;
-      const elapsed = Math.min(
-        Date.now() - runStartAtRef.current,
-        FACE_CAPTURE_MS,
-      );
+      const elapsed = Math.min(Date.now() - runStartAtRef.current, FACE_CAPTURE_MS);
       setElapsedMs(elapsed);
     }, 100);
     timeoutRef.current = window.setTimeout(() => {
@@ -232,7 +271,7 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
         video: true,
         audio: true,
       });
-    } catch (error) {
+    } catch {
       setPermissionError("Camera and microphone access is required to start.");
       setIsPermissionChecking(false);
       return;
@@ -268,16 +307,37 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
     startLockRef.current = false;
   };
 
-  const progressPercent = Math.round(
-    (Math.min(elapsedMs, FACE_CAPTURE_MS) / FACE_CAPTURE_MS) * 100,
+  const progressPercent = useMemo(
+    () => Math.round((Math.min(elapsedMs, FACE_CAPTURE_MS) / FACE_CAPTURE_MS) * 100),
+    [elapsedMs],
   );
   const isRunning = phase === "running";
-  const showMascot = phase === "mascot";
-  const isComplete = phase === "complete";
+  const showMascot = phase === "mascot" || phase === "idle";
   const isFaceScanActive = isRunning && cameraStatus === "Recording 10s...";
 
-  if (isComplete) {
-    return <CompletionScreen />;
+  if (phase === "complete") {
+    return (
+      <div>
+        <CompletionScreen />
+        <div className="mx-auto -mt-10 w-full max-w-3xl px-3 pb-10 sm:px-4">
+          <div className="rounded-[22px] border border-[#e8e2d8] bg-white p-5 shadow-[0_16px_30px_rgba(44,39,34,0.1)]">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
+              Result
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <span
+                className={`rounded-full px-4 py-2 text-sm font-semibold ${
+                  statusColor[status] || statusColor.neutral
+                }`}
+              >
+                {status || "—"}
+              </span>
+              <span className="text-sm text-stone-600">{reason}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -295,23 +355,49 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
             isFaceScanActive={isFaceScanActive}
           />
 
+          <div className="w-full rounded-[22px] border border-[#e8e2d8] bg-[#f7f7f7] p-5 shadow-[0_14px_28px_rgba(44,39,34,0.08)]">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
+                  Session
+                </p>
+                <p className="mt-1 text-sm font-medium text-stone-800">
+                  {isVoiceLive ? `Voice: ${voiceStatus}` : "Ready"}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
+                  Camera
+                </p>
+                <p className="mt-1 text-sm font-medium text-stone-800">
+                  {cameraStatus}
+                </p>
+              </div>
+            </div>
+            <p className="mt-3 text-sm text-stone-600">
+              Facial symmetry:{" "}
+              <span className="font-medium text-stone-800">
+                {facialSymmetryStatus}
+              </span>
+              {facialSymmetryReason ? (
+                <span className="text-stone-500"> · {facialSymmetryReason}</span>
+              ) : null}
+            </p>
+          </div>
+
           <ActionRow
             onStart={handleStart}
             onSecondary={handleSecondary}
             startDisabled={isVoiceLive || isStartLocked || isPermissionChecking}
-            secondaryDisabled={!isVoiceLive && !showMascot && !isRunning}
+            secondaryDisabled={!isVoiceLive && phase === "idle"}
             startLabel={
               isPermissionChecking
                 ? "Checking Access..."
-                : showMascot
-                  ? "Start Again"
-                  : isRunning
-                    ? "Running..."
-                    : "Start Check-In"
+                : isRunning
+                  ? "Running..."
+                  : "Start Check-In"
             }
-            secondaryLabel={
-              isVoiceLive || isRunning ? "Stop Session" : "Show Camera"
-            }
+            secondaryLabel={isVoiceLive || isRunning ? "Stop Session" : "Reset"}
           />
 
           {permissionError ? (
@@ -319,8 +405,26 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
               {permissionError}
             </p>
           ) : null}
+
+          <details className="w-full max-w-3xl rounded-[22px] border border-[#e8e2d8] bg-white px-5 py-4 text-sm text-stone-700 shadow-[0_14px_28px_rgba(44,39,34,0.06)]">
+            <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
+              Debug log
+            </summary>
+            <div className="mt-3 space-y-2">
+              {voiceLog.length === 0 ? (
+                <p className="text-stone-500">No messages yet.</p>
+              ) : (
+                voiceLog.slice(-30).map((line, idx) => (
+                  <p key={`${idx}-${line}`} className="break-words">
+                    {line}
+                  </p>
+                ))
+              )}
+            </div>
+          </details>
         </section>
       </main>
     </div>
   );
 }
+

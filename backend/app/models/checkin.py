@@ -93,6 +93,10 @@ class CheckinDetail(BaseModel):
     transcript: Optional[str] = None
     facial_symmetry: Optional[FacialSymmetryResult] = None
     heart_rate: Optional[HeartRateResult] = None
+    # Optional JPEG snapshot (data URL) captured during the 10s camera clip upload.
+    camera_snapshot: Optional[str] = None
+    # Gemini assessment stored at check-in completion time (doctor dashboard reads this directly).
+    ai_assessment: Optional[Dict[str, Any]] = None
 
 
 class CheckinListResponse(BaseModel):

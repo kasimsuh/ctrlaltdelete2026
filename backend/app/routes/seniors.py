@@ -71,6 +71,8 @@ def _checkin_detail_from_doc(doc: dict) -> CheckinDetail:
         transcript=doc.get("transcript"),
         facial_symmetry=doc.get("facial_symmetry_raw"),
         heart_rate=doc.get("heart_rate_raw"),
+        camera_snapshot=doc.get("camera_snapshot"),
+        ai_assessment=doc.get("ai_assessment"),
     )
 
 

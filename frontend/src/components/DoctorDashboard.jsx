@@ -21,15 +21,11 @@ const buildTriageCounts = (checkins) =>
 const buildSignalCounts = (checkins) =>
   checkins.reduce(
     (acc, checkin) => {
-      const signalText = `${checkin.transcript || ""} ${(checkin.triage_reasons || []).join(" ")}`
-        .toLowerCase()
-        .trim();
-      if (signalText.includes("dizz")) acc.dizziness += 1;
-      if (signalText.includes("chest")) acc.chest_pain += 1;
-      if (signalText.includes("breath")) acc.breathing += 1;
-      if (signalText.includes("med") && (signalText.includes("miss") || signalText.includes("not"))) {
-        acc.medication_missed += 1;
-      }
+      const signals = checkin?.ai_assessment?.signals || {};
+      if (signals.dizziness === "present") acc.dizziness += 1;
+      if (signals.chest_pain === "present") acc.chest_pain += 1;
+      if (signals.trouble_breathing === "present") acc.breathing += 1;
+      if (signals.medication_missed === "present") acc.medication_missed += 1;
       return acc;
     },
     { dizziness: 0, chest_pain: 0, breathing: 0, medication_missed: 0 },
@@ -61,8 +57,30 @@ const normalizeTriageLabel = (value) => {
   if (lowered === "green") return "Green";
   if (lowered === "yellow") return "Yellow";
   if (lowered === "red") return "Red";
-  if (lowered === "error") return "Error";
+  if (lowered === "error") return "Grey";
   return trimmed.replace(/^[a-z]/, (char) => char.toUpperCase());
+};
+
+const normalizeFacialLabel = (value) => {
+  if (!value) return "—";
+  const trimmed = `${value}`.trim();
+  if (!trimmed) return "—";
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "green") return "Green";
+  if (lowered === "yellow") return "Yellow";
+  if (lowered === "red") return "Red";
+  if (lowered === "error") return "Grey";
+  if (lowered === "retry") return "Grey";
+  if (lowered === "skipped") return "Grey";
+  return trimmed.replace(/^[a-z]/, (char) => char.toUpperCase());
+};
+
+const statusDotColor = (label) => {
+  const lowered = `${label || ""}`.toLowerCase();
+  if (lowered === "green") return "#10b981"; // emerald-500
+  if (lowered === "yellow") return "#f59e0b"; // amber-500
+  if (lowered === "red") return "#f43f5e"; // rose-500
+  return "#a8a29e"; // stone-400
 };
 
 export default function DoctorDashboard({ authUser, authToken, logout }) {
@@ -74,6 +92,7 @@ export default function DoctorDashboard({ authUser, authToken, logout }) {
   const [reportError, setReportError] = useState(null);
   const [reportData, setReportData] = useState(null);
   const [selectedSenior, setSelectedSenior] = useState(null);
+  const [openSnapshotId, setOpenSnapshotId] = useState(null);
 
   const closeReport = () => {
     setReportOpen(false);
@@ -81,6 +100,7 @@ export default function DoctorDashboard({ authUser, authToken, logout }) {
     setReportError(null);
     setReportData(null);
     setSelectedSenior(null);
+    setOpenSnapshotId(null);
   };
 
   const openReport = async (senior) => {
@@ -118,26 +138,21 @@ export default function DoctorDashboard({ authUser, authToken, logout }) {
         triageCounts,
       };
 
-      let summaryData = null;
-      try {
-        const summaryResponse = await apiFetch("/reports/senior-summary", {
-          method: "POST",
-          token: authToken,
-          body: buildReportPayload({ senior, checkins, stats, signals }),
-        });
-        summaryData = summaryResponse || null;
-      } catch (aiError) {
-        console.error("[DoctorDashboard] Failed to generate AI summary", aiError);
-        summaryData = null;
-      }
+      // AI assessment is generated at check-in completion and stored in Mongo.
+      // Avoid generating summaries on report-open (reduces latency + avoids substring heuristics).
+      const summaryData = checkins[0]?.ai_assessment || null;
 
       setReportData({
         checkins,
         stats,
         signals,
         summaryData,
-        generatedAt: new Date().toLocaleString(),
+        generatedAt:
+          summaryData?.generated_at
+            ? formatDateTime(summaryData.generated_at)
+            : new Date().toLocaleString(),
       });
+      setOpenSnapshotId(null);
     } catch (err) {
       setReportError(err?.message || "Failed to load report data");
     } finally {
@@ -456,6 +471,14 @@ export default function DoctorDashboard({ authUser, authToken, logout }) {
                         const triageLabel = normalizeTriageLabel(
                           checkin.triage_status,
                         );
+                        const facialLabel = normalizeFacialLabel(
+                          checkin?.facial_symmetry?.status,
+                        );
+                        const isRed =
+                          `${triageLabel || ""}`.toLowerCase() === "red";
+                        const hasSnapshot = Boolean(checkin?.camera_snapshot);
+                        const snapshotOpen =
+                          openSnapshotId === checkin.checkin_id;
                         return (
                           <div
                             key={checkin.checkin_id}
@@ -465,14 +488,51 @@ export default function DoctorDashboard({ authUser, authToken, logout }) {
                               <span className="font-semibold">
                                 {formatDateTime(checkin.completed_at)}
                               </span>
-                              <span
-                                className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                                  statusColor[triageLabel] || statusColor.neutral
-                                }`}
-                              >
-                                {triageLabel}
+                              <span className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-stone-700 ring-1 ring-stone-200">
+                                Triage:
+                                <span
+                                  className="inline-block h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/70"
+                                  style={{ backgroundColor: statusDotColor(triageLabel) }}
+                                />
+              
                               </span>
+                              <span className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-stone-700 ring-1 ring-stone-200">
+                                Facial:
+                                <span
+                                  className="inline-block h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/70"
+                                  style={{ backgroundColor: statusDotColor(facialLabel) }}
+                                />
+                              </span>
+                              {hasSnapshot ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setOpenSnapshotId(
+                                      snapshotOpen ? null : checkin.checkin_id,
+                                    )
+                                  }
+                                  className={`rounded-full px-3 py-1 text-xs font-semibold ring-1 ${
+                                    snapshotOpen
+                                      ? "bg-stone-900 text-white ring-stone-900"
+                                      : "bg-white text-stone-700 ring-stone-200 hover:bg-stone-50"
+                                  }`}
+                                >
+                                  {snapshotOpen ? "Hide photo" : "Show photo"}
+                                </button>
+                              ) : null}
                             </div>
+                            {snapshotOpen && hasSnapshot ? (
+                              <div className="mt-3 overflow-hidden rounded-2xl border border-stone-200 bg-white">
+                                <img
+                                  src={checkin.camera_snapshot}
+                                  alt="Check-in snapshot"
+                                  className={`w-full object-contain ${
+                                    isRed ? "max-h-[70vh]" : "max-h-[50vh]"
+                                  } bg-black`}
+                                  loading="lazy"
+                                />
+                              </div>
+                            ) : null}
                             {checkin.triage_reasons?.length ? (
                               <p className="mt-2 text-sm text-stone-600">
                                 Outcome: {checkin.triage_reasons.join("; ")}

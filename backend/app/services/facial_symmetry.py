@@ -58,8 +58,8 @@ def run_facial_symmetry_analysis(
         from vision.facial_symmetry import FacialSymmetryAnalyzer, summarize_session
     except Exception as exc:
         return FacialSymmetryResult(
-            status="ERROR",
-            reason="Facial symmetry dependencies are not available.",
+            status="SKIPPED",
+            reason="Facial symmetry dependencies are not installed; skipping analysis.",
             error=f"{exc.__class__.__name__}: {exc}",
         )
 

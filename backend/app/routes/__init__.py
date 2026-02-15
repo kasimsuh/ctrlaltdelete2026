@@ -14,6 +14,7 @@ from app.routes.seniors import router as seniors_router
 from app.routes.reports import router as reports_router
 from app.routes.alerts import router as alerts_router
 from app.routes.screenings import router as screenings_router
+from app.routes.elevenlabs import router as elevenlabs_router
 
 
 def register_routes(app) -> None:
@@ -26,6 +27,7 @@ def register_routes(app) -> None:
     app.include_router(reports_router, prefix="/reports", tags=["reports"])
     app.include_router(alerts_router, prefix="/alerts", tags=["alerts"])
     app.include_router(screenings_router, prefix="/screenings", tags=["screenings"])
+    app.include_router(elevenlabs_router, tags=["elevenlabs"])
 
     # Standalone /me endpoint at root level
     @app.get("/me", response_model=MeResponse)

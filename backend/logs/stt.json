@@ -1,0 +1,17 @@
+{
+  "user_id": "6991416bf8f56e4087a997b8",
+  "items": [
+    {
+      "question": "How are you feeling today?",
+      "answer": "... Yes. I'm feeling good."
+    },
+    {
+      "question": "Are you experiencing any dizziness, chest pain, or trouble breathing?",
+      "answer": "I have some trouble breathing."
+    },
+    {
+      "question": "Did you take your morning medications?",
+      "answer": "I did."
+    }
+  ]
+}
