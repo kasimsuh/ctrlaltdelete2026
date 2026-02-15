@@ -1,5 +1,6 @@
 """Check-in management routes."""
 
+import base64
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -249,6 +250,78 @@ def _triage_status_from_db(value: Optional[str]) -> Optional[TriageStatus]:
     return None
 
 
+def _triage_from_ai_signals(
+    signals: Optional[dict],
+    facial_symmetry: Optional[FacialSymmetryResult],
+) -> Optional[TriageStatus]:
+    """
+    Compute triage from Gemini's negation-aware signals.
+    Returns None when signals are missing/invalid.
+    """
+    if not isinstance(signals, dict) or not signals:
+        return None
+
+    def _facial_severity(result: Optional[FacialSymmetryResult]) -> Optional[TriageStatus]:
+        if result is None:
+            return None
+
+        status = (result.status or "").upper()
+        if status == "RED":
+            return TriageStatus.RED
+        if status == "YELLOW":
+            return TriageStatus.YELLOW
+        if status == "GREEN":
+            return TriageStatus.GREEN
+        if status in {"ERROR", "RETRY"}:
+            # Conservative: if facial analysis failed, do not mark GREEN.
+            return TriageStatus.YELLOW
+        if status == "SKIPPED":
+            return None
+
+        # Fallback when status is unknown but numeric index exists.
+        # combined_index from the facial pipeline is typically 0..100.
+        quality = None
+        if result.summary is not None:
+            try:
+                quality = float(result.summary.quality_ratio)
+            except Exception:
+                quality = None
+        if quality is not None and quality < 0.5:
+            return None
+
+        if result.combined_index is None:
+            return None
+        try:
+            idx = max(0.0, min(1.0, float(result.combined_index) / 100.0))
+        except Exception:
+            return None
+
+        if idx >= 0.85:
+            return TriageStatus.RED
+        if idx >= 0.65:
+            return TriageStatus.YELLOW
+        return TriageStatus.GREEN
+
+    chest = signals.get("chest_pain")
+    breath = signals.get("trouble_breathing")
+    dizzy = signals.get("dizziness")
+
+    speech = TriageStatus.GREEN
+    if chest == "present" or breath == "present":
+        speech = TriageStatus.RED
+    elif dizzy == "present":
+        speech = TriageStatus.YELLOW
+
+    facial = _facial_severity(facial_symmetry)
+
+    # Combine: take the more severe of (speech, facial).
+    if speech == TriageStatus.RED or facial == TriageStatus.RED:
+        return TriageStatus.RED
+    if speech == TriageStatus.YELLOW or facial == TriageStatus.YELLOW:
+        return TriageStatus.YELLOW
+    return TriageStatus.GREEN
+
+
 def _load_checkin(checkin_id: str) -> Optional[Dict[str, object]]:
     """Load check-in from cache or database."""
     checkin = CHECKINS.get(checkin_id)
@@ -270,6 +343,7 @@ def _load_checkin(checkin_id: str) -> Optional[Dict[str, object]]:
         "transcript": doc.get("transcript"),
         "user_id": doc.get("user_id"),
         "ai_assessment": doc.get("ai_assessment"),
+        "camera_snapshot": doc.get("camera_snapshot"),
     }
 
     if doc.get("facial_symmetry_raw"):
@@ -365,6 +439,7 @@ def start_checkin(
         "metrics": {},
         "facial_symmetry_raw": None,
         "heart_rate_raw": None,
+        "camera_snapshot": None,
         "user_message": None,
         "clinician_notes": None,
         "alert_level": None,
@@ -439,7 +514,7 @@ async def upload_checkin_artifacts(
 
     CHECKIN_UPLOADS[checkin_id] = files
 
-    # Update database with both facial symmetry and heart rate
+    # Update database with facial symmetry, heart rate, and an optional snapshot frame.
     update_doc = {}
     if facial_symmetry is not None:
         metrics_payload = build_facial_symmetry_metrics(facial_symmetry)
@@ -453,6 +528,19 @@ async def upload_checkin_artifacts(
             "hr_quality": heart_rate.hr_quality,
             "sqi": heart_rate.sqi,
         }
+
+    if frames:
+        try:
+            first = frames[0]
+            frame_bytes = await first.read()
+            # Keep payload small; a 360px JPEG should fit easily.
+            if frame_bytes and len(frame_bytes) <= 450_000:
+                data_url = "data:image/jpeg;base64," + base64.b64encode(frame_bytes).decode("ascii")
+                update_doc["camera_snapshot"] = data_url
+                checkin["camera_snapshot"] = data_url
+        except Exception:
+            # Snapshot is optional; don't fail the upload.
+            pass
     
     if update_doc:
         get_checkins_collection().update_one(
@@ -569,10 +657,14 @@ def complete_checkin(
     except Exception:
         pass
 
-    # Optionally enrich triage reasons from AI signals (handles negation vs. substring matches).
+    # Prefer Gemini's negation-aware signals for triage when available.
     try:
         signals = ai_assessment.get("signals") if isinstance(ai_assessment, dict) else None
         if isinstance(signals, dict):
+            derived_status = _triage_from_ai_signals(signals, facial_symmetry)
+            if derived_status is not None:
+                triage_status = derived_status
+
             derived: list[str] = []
             if signals.get("chest_pain") == "present" or signals.get("trouble_breathing") == "present":
                 derived.append("Speech indicates a red-flag symptom")
@@ -590,6 +682,7 @@ def complete_checkin(
         pass
 
     triage_status_db = triage_status.value.lower()
+    checkin["triage_status"] = triage_status
 
     update_result = get_checkins_collection().update_one(
         {"checkin_id": checkin_id},
@@ -766,5 +859,6 @@ def get_checkin(checkin_id: str) -> CheckinDetail:
         transcript=checkin.get("transcript"),
         facial_symmetry=checkin.get("facial_symmetry"),
         heart_rate=checkin.get("heart_rate"),
+        camera_snapshot=checkin.get("camera_snapshot"),
         ai_assessment=checkin.get("ai_assessment"),
     )

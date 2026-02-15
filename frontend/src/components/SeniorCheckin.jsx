@@ -1,153 +1,133 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import useCheckin from "../hooks/useCheckin.js";
-import { statusColor } from "../lib/screening.js";
+import { cameraDurationMs, statusColor } from "../lib/screening.js";
+import CompletionScreen from "./checkin/CompletionScreen.jsx";
 
-export default function SeniorCheckin({ authUser, authToken, logout }) {
-  const {
-    status,
-    reason,
-    isDemoMode,
-    setIsDemoMode,
-    voiceStatus,
-    voiceLog,
-    isVoiceLive,
-    cameraStatus,
-    facialSymmetryStatus,
-    facialSymmetryReason,
-    cameraVideoRef,
-    startCheckin,
-    startVoice,
-    stopVoice,
-  } = useCheckin(authUser, authToken);
+const PAGE_SHELL_CLASS =
+  "min-h-screen bg-[#f3f0ea] px-3 py-2 text-[#1d1b19] sm:px-4 sm:py-3";
 
-  const chipClass = statusColor[status] || statusColor.neutral;
-  const chipText = status || "—";
+const FACE_CAPTURE_MS = cameraDurationMs;
+const CAMERA_DONE_STATUSES = new Set(["Uploaded", "Error"]);
+
+function HeaderBar({ authUser, logout }) {
+  return (
+    <header className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-[22px] border border-[#e8e2d8] bg-[#f7f7f7] px-5 py-4 shadow-[0_14px_28px_rgba(44,39,34,0.08)] sm:mt-4 sm:px-6">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.26em] text-[#9b6a52]">
+          Guardian Check-In
+        </p>
+        <p className="mt-1 text-sm text-stone-700">
+          Signed in as{" "}
+          <span className="font-semibold">
+            {authUser?.firstName} {authUser?.lastName}
+          </span>
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={logout}
+        className="rounded-full bg-stone-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-stone-800"
+      >
+        Log out
+      </button>
+    </header>
+  );
+}
+
+function Mascot() {
+  return (
+    <div className="grid h-full w-full place-items-center">
+      <div className="relative h-44 w-44">
+        <div className="absolute inset-0 rounded-full bg-gradient-to-br from-[#f2d4bf] via-[#f4e2d5] to-[#f7f7f7]" />
+        <div className="absolute left-6 top-7 h-20 w-20 rounded-full bg-[#f7f7f7] shadow-[0_10px_18px_rgba(60,45,36,0.08)]" />
+        <div className="absolute right-8 top-10 h-16 w-16 rounded-full bg-[#f7f7f7] shadow-[0_10px_18px_rgba(60,45,36,0.08)]" />
+        <div className="absolute bottom-7 left-1/2 h-14 w-28 -translate-x-1/2 rounded-[999px] bg-[#e46535]/15 shadow-inner" />
+        <div className="absolute bottom-11 left-1/2 h-2 w-10 -translate-x-1/2 rounded-full bg-[#e46535]" />
+      </div>
+    </div>
+  );
+}
+
+function ProgressRing({ percent }) {
+  const radius = 30;
+  const stroke = 6;
+  const normalizedRadius = radius - stroke * 0.5;
+  const circumference = normalizedRadius * 2 * Math.PI;
+  const offset = circumference - (Math.min(100, Math.max(0, percent)) / 100) * circumference;
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#f6efe5_0%,_#f4f0e8_40%,_#f8f2ed_100%)] text-ink">
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-6 pb-16 pt-12 sm:px-8">
-        <div className="flex items-center justify-between rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-stone-700">
-          <span>
-            Logged in as{" "}
-            <span className="font-semibold">
-              {authUser?.firstName} {authUser?.lastName}
-            </span>
-          </span>
-          <button
-            onClick={logout}
-            className="rounded-full bg-stone-900 px-4 py-2 text-sm font-semibold text-white hover:bg-stone-800"
-          >
-            Log out
-          </button>
-        </div>
+    <svg
+      width={(radius + stroke) * 2}
+      height={(radius + stroke) * 2}
+      className="text-[#e46535]"
+    >
+      <circle
+        stroke="rgba(148, 163, 184, 0.35)"
+        fill="transparent"
+        strokeWidth={stroke}
+        r={normalizedRadius}
+        cx={radius + stroke}
+        cy={radius + stroke}
+      />
+      <circle
+        stroke="currentColor"
+        fill="transparent"
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={`${circumference} ${circumference}`}
+        strokeDashoffset={offset}
+        r={normalizedRadius}
+        cx={radius + stroke}
+        cy={radius + stroke}
+      />
+    </svg>
+  );
+}
 
-        <header className="rounded-[28px] border border-amber-100 bg-amber-50/80 p-8 shadow-hero backdrop-blur">
-          <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-700">
-            Guardian Check-In
-          </p>
-          <h1 className="mt-3 text-4xl font-semibold sm:text-5xl">
-            Daily health check-in
-          </h1>
-          <p className="mt-3 max-w-2xl text-lg text-stone-600">
-            Quick camera + voice Q&amp;A, then a simple Green/Yellow/Red result.
-          </p>
-          <div className="mt-6 flex flex-wrap items-center gap-4">
-            <button
-              className="rounded-full bg-clay px-6 py-3 text-base font-semibold text-white shadow-lg shadow-orange-200/60 transition hover:-translate-y-0.5"
-              onClick={startCheckin}
-            >
-              Start Check-In
-            </button>
-            <label className="flex items-center gap-2 text-sm text-stone-700">
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-clay"
-                checked={isDemoMode}
-                onChange={(event) => setIsDemoMode(event.target.checked)}
-              />
-              Demo mode
-            </label>
-          </div>
-        </header>
+function HeroStage({
+  showMascot,
+  cameraVideoRef,
+  isRunning,
+  progressPercent,
+  timerDone,
+  isFaceScanActive,
+}) {
+  return (
+    <div className="w-full overflow-hidden rounded-[28px] border border-[#e8e2d8] bg-[#1f1a17] shadow-[0_18px_36px_rgba(44,39,34,0.18)]">
+      <div className="relative aspect-video w-full">
+        {showMascot || !isRunning ? (
+          <Mascot />
+        ) : (
+          <video
+            ref={cameraVideoRef}
+            autoPlay
+            muted
+            playsInline
+            className="h-full w-full object-cover"
+          />
+        )}
 
-        <section className="rounded-2xl border border-amber-100 bg-white p-6 shadow-card">
-          <h2 className="text-xl font-semibold">Status</h2>
-          <p className="mt-2 text-stone-600">
-            {status ? `Status: ${status}` : "Not started"}
-          </p>
-          <div
-            className={`mt-3 inline-flex items-center rounded-full px-4 py-2 text-sm font-semibold ${chipClass}`}
-          >
-            {chipText}
-          </div>
-          <p className="mt-3 text-sm text-stone-600">{reason}</p>
-        </section>
-
-        <section className="rounded-2xl border border-amber-100 bg-white p-6 shadow-card">
-          <div className="flex flex-col gap-6 lg:flex-row">
-            <div className="w-full lg:w-1/2">
-              <h3 className="text-lg font-semibold">
-                Camera + Voice Check-In
-              </h3>
-              <p className="mt-2 text-sm text-stone-600">
-                {isVoiceLive
-                  ? `Voice status: ${voiceStatus}`
-                  : "Start the live voice assistant to begin."}
+        {isRunning ? (
+          <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-3 bg-gradient-to-t from-black/60 via-black/25 to-transparent px-5 py-4 text-[#fff6e8]">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#f8e7d3]/80">
+                Face scan
               </p>
-              <p className="mt-1 text-xs text-stone-500">
-                Camera status: {cameraStatus}
-              </p>
-              <p className="mt-1 text-xs text-stone-500">
-                Facial symmetry: {facialSymmetryStatus}
-              </p>
-              <p className="mt-1 text-xs text-stone-500">
-                {facialSymmetryReason}
-              </p>
-              <div className="mt-4 flex flex-wrap gap-3">
-                <button
-                  className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
-                  onClick={startVoice}
-                  disabled={isVoiceLive}
-                >
-                  Start session
-                </button>
-                <button
-                  className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
-                  onClick={stopVoice}
-                  disabled={!isVoiceLive}
-                >
-                  Stop
-                </button>
-              </div>
-              <div className="mt-4 max-h-40 overflow-auto rounded-lg bg-amber-50/60 p-3 text-xs text-stone-700">
-                {voiceLog.length === 0
-                  ? "No messages yet."
-                  : voiceLog.join("\n\n")}
-              </div>
-            </div>
-            <div className="w-full lg:w-1/2">
-              <div className="aspect-video overflow-hidden rounded-2xl border border-amber-100 bg-amber-50/50">
-                <video
-                  ref={cameraVideoRef}
-                  autoPlay
-                  muted
-                  playsInline
-                  className="h-full w-full object-cover"
-                />
-              </div>
-              <p className="mt-2 text-xs text-stone-500">
-                The camera preview appears while the 10s recording is in
-                progress.
+              <p className="mt-1 text-sm font-medium">
+                {timerDone
+                  ? "Finishing analysis..."
+                  : isFaceScanActive
+                    ? "Analyzing face data for 10 seconds..."
+                    : "Waiting for camera..."}
               </p>
             </div>
-            <p className="mt-2 text-xs font-medium text-[#fff6e8]">
-              {timerDone
-                ? "Finishing analysis..."
-                : isFaceScanActive
-                  ? "Analyzing face data for 10 seconds..."
-                  : "Loading Questions ..."}
-            </p>
+            <div className="flex items-center gap-3">
+              <ProgressRing percent={progressPercent} />
+              <p className="text-sm font-semibold tabular-nums">
+                {progressPercent}%
+              </p>
+            </div>
           </div>
         ) : null}
       </div>
@@ -187,14 +167,21 @@ function ActionRow({
 
 export default function SeniorCheckin({ authUser, authToken, logout }) {
   const {
+    status,
+    reason,
     isVoiceLive,
     isCheckinComplete,
+    voiceStatus,
+    voiceLog,
     cameraStatus,
+    facialSymmetryStatus,
+    facialSymmetryReason,
     cameraVideoRef,
     startVoice,
     stopVoice,
   } = useCheckin(authUser, authToken);
-  const [phase, setPhase] = useState("idle");
+
+  const [phase, setPhase] = useState("idle"); // idle | running | mascot | complete
   const [elapsedMs, setElapsedMs] = useState(0);
   const [timerDone, setTimerDone] = useState(false);
   const [isStartLocked, setIsStartLocked] = useState(false);
@@ -231,10 +218,7 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
     clearRunTimers();
     intervalRef.current = window.setInterval(() => {
       if (!runStartAtRef.current) return;
-      const elapsed = Math.min(
-        Date.now() - runStartAtRef.current,
-        FACE_CAPTURE_MS,
-      );
+      const elapsed = Math.min(Date.now() - runStartAtRef.current, FACE_CAPTURE_MS);
       setElapsedMs(elapsed);
     }, 100);
     timeoutRef.current = window.setTimeout(() => {
@@ -287,7 +271,7 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
         video: true,
         audio: true,
       });
-    } catch (error) {
+    } catch {
       setPermissionError("Camera and microphone access is required to start.");
       setIsPermissionChecking(false);
       return;
@@ -323,16 +307,37 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
     startLockRef.current = false;
   };
 
-  const progressPercent = Math.round(
-    (Math.min(elapsedMs, FACE_CAPTURE_MS) / FACE_CAPTURE_MS) * 100,
+  const progressPercent = useMemo(
+    () => Math.round((Math.min(elapsedMs, FACE_CAPTURE_MS) / FACE_CAPTURE_MS) * 100),
+    [elapsedMs],
   );
   const isRunning = phase === "running";
-  const showMascot = phase === "mascot";
-  const isComplete = phase === "complete";
+  const showMascot = phase === "mascot" || phase === "idle";
   const isFaceScanActive = isRunning && cameraStatus === "Recording 10s...";
 
-  if (isComplete) {
-    return <CompletionScreen />;
+  if (phase === "complete") {
+    return (
+      <div>
+        <CompletionScreen />
+        <div className="mx-auto -mt-10 w-full max-w-3xl px-3 pb-10 sm:px-4">
+          <div className="rounded-[22px] border border-[#e8e2d8] bg-white p-5 shadow-[0_16px_30px_rgba(44,39,34,0.1)]">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
+              Result
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <span
+                className={`rounded-full px-4 py-2 text-sm font-semibold ${
+                  statusColor[status] || statusColor.neutral
+                }`}
+              >
+                {status || "—"}
+              </span>
+              <span className="text-sm text-stone-600">{reason}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -350,23 +355,49 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
             isFaceScanActive={isFaceScanActive}
           />
 
+          <div className="w-full rounded-[22px] border border-[#e8e2d8] bg-[#f7f7f7] p-5 shadow-[0_14px_28px_rgba(44,39,34,0.08)]">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
+                  Session
+                </p>
+                <p className="mt-1 text-sm font-medium text-stone-800">
+                  {isVoiceLive ? `Voice: ${voiceStatus}` : "Ready"}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
+                  Camera
+                </p>
+                <p className="mt-1 text-sm font-medium text-stone-800">
+                  {cameraStatus}
+                </p>
+              </div>
+            </div>
+            <p className="mt-3 text-sm text-stone-600">
+              Facial symmetry:{" "}
+              <span className="font-medium text-stone-800">
+                {facialSymmetryStatus}
+              </span>
+              {facialSymmetryReason ? (
+                <span className="text-stone-500"> · {facialSymmetryReason}</span>
+              ) : null}
+            </p>
+          </div>
+
           <ActionRow
             onStart={handleStart}
             onSecondary={handleSecondary}
             startDisabled={isVoiceLive || isStartLocked || isPermissionChecking}
-            secondaryDisabled={!isVoiceLive && !showMascot && !isRunning}
+            secondaryDisabled={!isVoiceLive && phase === "idle"}
             startLabel={
               isPermissionChecking
                 ? "Checking Access..."
-                : showMascot
-                  ? "Start Again"
-                  : isRunning
-                    ? "Running..."
-                    : "Start Check-In"
+                : isRunning
+                  ? "Running..."
+                  : "Start Check-In"
             }
-            secondaryLabel={
-              isVoiceLive || isRunning ? "Stop Session" : "Show Camera"
-            }
+            secondaryLabel={isVoiceLive || isRunning ? "Stop Session" : "Reset"}
           />
 
           {permissionError ? (
@@ -374,8 +405,26 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
               {permissionError}
             </p>
           ) : null}
+
+          <details className="w-full max-w-3xl rounded-[22px] border border-[#e8e2d8] bg-white px-5 py-4 text-sm text-stone-700 shadow-[0_14px_28px_rgba(44,39,34,0.06)]">
+            <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
+              Debug log
+            </summary>
+            <div className="mt-3 space-y-2">
+              {voiceLog.length === 0 ? (
+                <p className="text-stone-500">No messages yet.</p>
+              ) : (
+                voiceLog.slice(-30).map((line, idx) => (
+                  <p key={`${idx}-${line}`} className="break-words">
+                    {line}
+                  </p>
+                ))
+              )}
+            </div>
+          </details>
         </section>
       </main>
     </div>
   );
 }
+

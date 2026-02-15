@@ -3,15 +3,15 @@
   "items": [
     {
       "question": "How are you feeling today?",
-      "answer": "Okay. I'm feeling great."
+      "answer": "... Yes. I'm feeling good."
     },
     {
       "question": "Are you experiencing any dizziness, chest pain, or trouble breathing?",
-      "answer": "No dizziness or anything."
+      "answer": "I have some trouble breathing."
     },
     {
       "question": "Did you take your morning medications?",
-      "answer": "Yes, I did."
+      "answer": "I did."
     }
   ]
 }

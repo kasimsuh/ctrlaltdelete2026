@@ -12,128 +12,45 @@ import {
 } from "../lib/screening.js";
 
 const apiBase = API_BASE;
-const FACE_CAPTURE_BUFFER_MS = 6500;
 
 export default function useCheckin(authUser, authToken) {
   const [status, setStatus] = useState(null);
   const [reason, setReason] = useState("Run a check-in to see triage output.");
-  const [isDemoMode, setIsDemoMode] = useState(true);
   const [voiceStatus, setVoiceStatus] = useState("Idle");
   const [voiceLog, setVoiceLog] = useState([]);
   const [isVoiceLive, setIsVoiceLive] = useState(false);
+  const [isCheckinComplete, setIsCheckinComplete] = useState(false);
+
   const [cameraStatus, setCameraStatus] = useState("Idle");
   const [facialSymmetryStatus, setFacialSymmetryStatus] = useState("Not run");
   const [facialSymmetryReason, setFacialSymmetryReason] = useState(
     "Facial symmetry results will appear after camera upload.",
   );
+
   const cameraVideoRef = useRef(null);
   const cameraStreamRef = useRef(null);
 
   const convoRef = useRef(null);
   const checkinIdRef = useRef(null);
-  const isSessionOpenRef = useRef(false);
   const startVoiceInFlightRef = useRef(false);
   const lastUserMessageRef = useRef(null);
   const lastModeRef = useRef("listening");
   const finalizePendingRef = useRef(false);
   const finalizeStartedRef = useRef(false);
   const finalizeTimeoutRef = useRef(null);
+  const autoEndOnListeningRef = useRef(false);
   const cameraStartedRef = useRef(false);
   const introPendingRef = useRef(false);
   const currentQuestionIndexRef = useRef(0);
-  const responsesRef = useRef(
-    INITIAL_RESPONSES.map((item) => ({ ...item })),
-  );
-  const recognitionRef = useRef(null);
+  const responsesRef = useRef(INITIAL_RESPONSES.map((item) => ({ ...item })));
 
-  const startCheckin = async () => {
-    setStatus("Starting");
-    setReason("Creating a new check-in...");
-
-    try {
-      const response = await fetch(`${apiBase}/checkins/start`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-        },
-        body: JSON.stringify({}),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to start check-in");
-      }
-
-      const data = await response.json();
-      const completeResponse = await fetch(
-        `${apiBase}/checkins/${data.checkin_id}/complete`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-          },
-          body: JSON.stringify({
-            answers: {
-              dizziness: false,
-              chest_pain: false,
-              trouble_breathing: false,
-            },
-            transcript: "Feeling ok today.",
-          }),
-        },
-      );
-
-      if (!completeResponse.ok) {
-        throw new Error("Failed to complete check-in");
-      }
-
-      const result = await completeResponse.json();
-      setStatus(result.triage_status);
-      setReason(result.triage_reasons.join("; "));
-    } catch (error) {
-      setStatus("Error");
-      setReason(error?.message || "Something went wrong.");
-    }
-  };
-
-  const cleanupAudio = async () => {
-    setIsVoiceLive(false);
-    if (completionTimerRef.current) {
-      clearInterval(completionTimerRef.current);
-      completionTimerRef.current = null;
-    }
-    if (startupAudioNudgeTimerRef.current) {
-      clearTimeout(startupAudioNudgeTimerRef.current);
-      startupAudioNudgeTimerRef.current = null;
-    }
-    lastAudioAtRef.current = null;
-    lastAiAudioAtRef.current = null;
-    lastAiBurstAtRef.current = null;
-    heardAudioRef.current = false;
-    completionSentRef.current = false;
-    completionPromptedRef.current = false;
-    completionPromptAtRef.current = null;
-    aiTurnCountRef.current = 0;
-    userSpeakingRef.current = false;
-    userSpeechStartRef.current = null;
-    currentQuestionIndexRef.current = 0;
-    responsesRef.current = responsesRef.current.map((item) => ({
-      ...item,
-      answer: null,
-      transcript: null,
-    }));
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
-    }
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((track) => track.stop());
-      micStreamRef.current = null;
+  const stopVoice = async () => {
+    setVoiceStatus("Stopping...");
+    startVoiceInFlightRef.current = false;
+    autoEndOnListeningRef.current = false;
+    if (finalizeTimeoutRef.current) {
+      clearTimeout(finalizeTimeoutRef.current);
+      finalizeTimeoutRef.current = null;
     }
     if (cameraStreamRef.current) {
       cameraStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -150,7 +67,6 @@ export default function useCheckin(authUser, authToken) {
     convoRef.current = null;
     setIsVoiceLive(false);
     setVoiceStatus("Idle");
-    startVoiceInFlightRef.current = false;
   };
 
   const finalizeSession = async ({ uploadPromise }) => {
@@ -181,100 +97,141 @@ export default function useCheckin(authUser, authToken) {
       ]);
     }
 
-    // Give the agent audio path a beat to flush before closing.
-    setTimeout(() => {
-      stopVoice();
-    }, 1200);
-  };
-
-  const captureAndUploadCamera = async ({ checkinId, uploadUrl, uploadHeaders }) => {
-    try {
-      setCameraStatus("Recording 10s...");
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: false,
-      });
-      cameraStreamRef.current = stream;
-      if (cameraVideoRef.current) {
-        cameraVideoRef.current.srcObject = stream;
-      }
-
-      const preferredType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
-        ? "video/webm;codecs=vp8"
-        : "video/webm";
-      const recorder = new MediaRecorder(
-        stream,
-        preferredType ? { mimeType: preferredType } : undefined,
-      );
-      const chunks = [];
-
-      const videoBlob = await new Promise((resolve, reject) => {
-        recorder.ondataavailable = (event) => {
-          if (event.data && event.data.size > 0) chunks.push(event.data);
-        };
-        recorder.onerror = (event) =>
-          reject(event.error || new Error("Camera recording failed"));
-        recorder.onstop = () =>
-          resolve(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
-        recorder.start();
-        setTimeout(() => recorder.stop(), cameraDurationMs);
-      });
-
-      if (cameraStreamRef.current) {
-        cameraStreamRef.current.getTracks().forEach((track) => track.stop());
-        cameraStreamRef.current = null;
-      }
-      if (cameraVideoRef.current) {
-        cameraVideoRef.current.srcObject = null;
-      }
-
-      setCameraStatus("Uploading...");
-      const formData = new FormData();
-      formData.append("video", videoBlob, "checkin.webm");
-      formData.append("metadata", JSON.stringify({ duration_ms: cameraDurationMs }));
-
-      const resp = await fetch(uploadUrl, {
-        method: "POST",
-        headers: uploadHeaders,
-        body: formData,
-      });
-      if (!resp.ok) throw new Error("Failed to upload camera clip");
-
-      const uploadData = await resp.json();
-      const facial = uploadData?.facial_symmetry;
-      if (facial?.status) {
-        setFacialSymmetryStatus(facial.status);
-        setFacialSymmetryReason(facial.reason || "No details returned.");
-      } else {
-        setFacialSymmetryStatus("Missing");
-        setFacialSymmetryReason("No facial symmetry payload returned.");
-      }
-      setCameraStatus("Uploaded");
-    } catch (e) {
-      setCameraStatus("Error");
-      setFacialSymmetryStatus("Error");
-      setFacialSymmetryReason(e?.message || "Camera capture/upload failed.");
-      throw e;
+    // Auto-end the session right after the agent finishes speaking (mode -> listening).
+    // If we're already in listening, end immediately; otherwise wait for onModeChange.
+    autoEndOnListeningRef.current = true;
+    if (lastModeRef.current === "listening") {
+      void stopVoice();
     }
   };
 
+  const captureAndUploadCamera = async ({ uploadUrl, uploadHeaders }) => {
+    setCameraStatus("Recording 10s...");
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false,
+    });
+    cameraStreamRef.current = stream;
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.srcObject = stream;
+    }
+
+    const captureSnapshotFromVideo = async () => {
+      const videoEl = cameraVideoRef.current;
+      if (!videoEl) return null;
+
+      // Wait until there's at least one frame to draw.
+      const startAt = Date.now();
+      while (Date.now() - startAt < 2000) {
+        if (videoEl.readyState >= 2 && videoEl.videoWidth > 0) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (videoEl.videoWidth <= 0 || videoEl.videoHeight <= 0) return null;
+
+      const maxW = 360;
+      const scale = Math.min(1, maxW / videoEl.videoWidth);
+      const w = Math.max(1, Math.round(videoEl.videoWidth * scale));
+      const h = Math.max(1, Math.round(videoEl.videoHeight * scale));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(videoEl, 0, 0, w, h);
+
+      const blob = await new Promise((resolve) => {
+        canvas.toBlob(
+          (b) => resolve(b),
+          "image/jpeg",
+          0.78,
+        );
+      });
+      return blob;
+    };
+
+    const preferredType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
+      ? "video/webm;codecs=vp8"
+      : "video/webm";
+    const recorder = new MediaRecorder(
+      stream,
+      preferredType ? { mimeType: preferredType } : undefined,
+    );
+    const chunks = [];
+
+    // Capture a single snapshot mid-recording (best chance of a clean frame).
+    const snapshotPromise = (async () => {
+      await new Promise((r) => setTimeout(r, 1500));
+      return await captureSnapshotFromVideo();
+    })();
+
+    const videoBlob = await new Promise((resolve, reject) => {
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.onerror = (event) =>
+        reject(event.error || new Error("Camera recording failed"));
+      recorder.onstop = () =>
+        resolve(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
+      recorder.start();
+      setTimeout(() => recorder.stop(), cameraDurationMs);
+    });
+
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.srcObject = null;
+    }
+
+    setCameraStatus("Uploading...");
+    const formData = new FormData();
+    formData.append("video", videoBlob, "checkin.webm");
+    try {
+      const snapshotBlob = await snapshotPromise;
+      if (snapshotBlob) {
+        formData.append("frames", snapshotBlob, "snapshot.jpg");
+      }
+    } catch {
+      // ignore snapshot failures
+    }
+    formData.append("metadata", JSON.stringify({ duration_ms: cameraDurationMs }));
+
+    const resp = await fetch(uploadUrl, {
+      method: "POST",
+      headers: uploadHeaders,
+      body: formData,
+    });
+    if (!resp.ok) throw new Error("Failed to upload camera clip");
+
+    const uploadData = await resp.json();
+    const facial = uploadData?.facial_symmetry;
+    if (facial?.status) {
+      setFacialSymmetryStatus(facial.status);
+      setFacialSymmetryReason(facial.reason || "No details returned.");
+    } else {
+      setFacialSymmetryStatus("Missing");
+      setFacialSymmetryReason("No facial symmetry payload returned.");
+    }
+    setCameraStatus("Uploaded");
+  };
+
   const saveQaJson = async () => {
-    // Ensure the saved JSON always includes the canonical question text.
     const items = responsesRef.current.map((r, idx) => ({
       question: r?.q ?? INITIAL_RESPONSES[idx]?.q ?? "",
       answer: r?.transcript ?? "",
     }));
 
-    await fetch(`${apiBase}/screenings`, {
+    await fetch(`${apiBase}/stt/qa/save`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       },
-      body: JSON.stringify({
-        items,
-      }),
+      body: JSON.stringify({ items }),
     });
+  };
 
   const completeCheckin = async () => {
     const checkinId = checkinIdRef.current;
@@ -298,7 +255,7 @@ export default function useCheckin(authUser, authToken) {
 
     const transcript = buildTranscript(responses);
 
-    await fetch(`${apiBase}/checkins/${checkinIdRef.current}/complete`, {
+    const resp = await fetch(`${apiBase}/checkins/${checkinId}/complete?force=true`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -306,85 +263,37 @@ export default function useCheckin(authUser, authToken) {
       },
       body: JSON.stringify({ answers, transcript }),
     });
-  };
-
-  const maybePromptCompletion = (session) => {
-    if (!session || completionPromptedRef.current) return;
-    completionPromptedRef.current = true;
-    completionPromptAtRef.current = Date.now();
-    setVoiceLog((prev) => [...prev, "Requesting final closing message..."]);
-    session.sendRealtimeInput({
-      text: `All screening questions are complete. Say exactly this sentence now: "${completionPhrase}"`,
-    });
-  };
-
-  const captureCameraClip = async () => {
-    setCameraStatus("Recording 10s...");
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: false,
-    });
-    cameraStreamRef.current = stream;
-    if (cameraVideoRef.current) {
-      cameraVideoRef.current.srcObject = stream;
-    }
-    const preferredType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
-      ? "video/webm;codecs=vp8"
-      : "video/webm";
-    const recorder = new MediaRecorder(
-      stream,
-      preferredType ? { mimeType: preferredType } : undefined,
-    );
-    const chunks = [];
-
-    return await new Promise((resolve, reject) => {
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          chunks.push(event.data);
-        }
-      };
-      recorder.onerror = (event) => {
-        setCameraStatus("Error");
-        reject(event.error || new Error("Camera recording failed"));
-      };
-      recorder.onstop = () => {
-        if (cameraStreamRef.current) {
-          cameraStreamRef.current.getTracks().forEach((track) => track.stop());
-          cameraStreamRef.current = null;
-        }
-        if (cameraVideoRef.current) {
-          cameraVideoRef.current.srcObject = null;
-        }
-        setCameraStatus("Recorded");
-        resolve(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
-      };
-      recorder.start();
-      setTimeout(() => recorder.stop(), cameraDurationMs);
-    });
-  };
-
-  const uploadCameraClip = async (checkinId, videoBlob) => {
-    setCameraStatus("Uploading...");
-    const formData = new FormData();
-    formData.append("video", videoBlob, "checkin.webm");
-    formData.append(
-      "metadata",
-      JSON.stringify({ duration_ms: cameraDurationMs }),
-    );
-    const response = await fetch(`${apiBase}/checkins/${checkinId}/upload`, {
-      method: "POST",
-      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
-      body: formData,
-    });
-    if (!response.ok) {
-      let detail = "Failed to upload camera clip";
+    if (!resp.ok) {
+      let msg = "Failed to complete check-in";
       try {
-        const payload = await response.json();
-        if (payload?.detail) detail = String(payload.detail);
+        const payload = await resp.json();
+        if (payload?.detail?.message) msg = String(payload.detail.message);
+        else if (payload?.detail) msg = String(payload.detail);
       } catch {
-        // Keep default detail when response body is not JSON.
+        // ignore
       }
-      throw new Error(detail);
+      throw new Error(msg);
+    }
+    const result = await resp.json();
+    setStatus(result.triage_status);
+    setReason((result.triage_reasons || []).join("; "));
+    setIsCheckinComplete(true);
+  };
+
+  const updateQuestionIndexFromAi = (text) => {
+    const lower = String(text || "").toLowerCase();
+    if (lower.includes("how are you feeling")) {
+      currentQuestionIndexRef.current = 0;
+      return;
+    }
+    if (
+      lower.includes("dizziness") ||
+      lower.includes("chest pain") ||
+      lower.includes("trouble breathing") ||
+      lower.includes("breathing")
+    ) {
+      currentQuestionIndexRef.current = 1;
+      return;
     }
     if (
       lower.includes("morning medications") ||
@@ -396,14 +305,18 @@ export default function useCheckin(authUser, authToken) {
   };
 
   const startVoice = async () => {
-    if (isVoiceLive) return;
+    if (isVoiceLive || startVoiceInFlightRef.current) return;
+    startVoiceInFlightRef.current = true;
 
     setIsVoiceLive(true);
+    setIsCheckinComplete(false);
     setVoiceStatus("Connecting...");
     setVoiceLog([]);
     setCameraStatus("Idle");
     setFacialSymmetryStatus("Pending");
     setFacialSymmetryReason("Camera capture in progress...");
+    setStatus(null);
+    setReason("Screening in progress...");
 
     // Reset answers for this run.
     lastUserMessageRef.current = null;
@@ -432,308 +345,153 @@ export default function useCheckin(authUser, authToken) {
       const checkinData = await checkinResponse.json();
       checkinIdRef.current = checkinData.checkin_id;
 
-      const tokenResponse = await fetch(`${apiBase}/auth/ephemeral`, {
-        method: "POST",
-      });
-      if (!tokenResponse.ok) {
-        throw new Error("Failed to fetch ephemeral token");
-      }
-      const tokenData = await tokenResponse.json();
+      // We'll start camera after the agent speaks the intro. Keep a stable promise for finalize().
+      let uploadPromise = Promise.resolve();
 
-      const ai = new GoogleGenAI({
-        apiKey: tokenData.token,
-        httpOptions: { apiVersion: "v1alpha" },
-      });
-      const session = await ai.live.connect({
-        model: modelName,
-        httpOptions: { apiVersion: "v1alpha" },
-        config: {
-          responseModalities: [Modality.AUDIO],
-          systemInstruction,
-        },
-        callbacks: {
-          onmessage: (message) => {
-            if (message.serverContent?.modelTurn?.parts) {
-              message.serverContent.modelTurn.parts.forEach((part) => {
-                if (part.inlineData?.data) {
-                  const audioContext = audioContextRef.current;
-                  if (!audioContext) return;
-                  const pcm = decodeBase64ToInt16(part.inlineData.data);
-                  lastAudioAtRef.current = Date.now();
-                  lastAiAudioAtRef.current = Date.now();
-                  if (
-                    !lastAiBurstAtRef.current ||
-                    Date.now() - lastAiBurstAtRef.current > 1000
-                  ) {
-                    aiTurnCountRef.current += 1;
-                    const questionIndex = Math.max(
-                      0,
-                      Math.min(
-                        aiTurnCountRef.current - 2,
-                        responsesRef.current.length - 1,
-                      ),
-                    );
-                    currentQuestionIndexRef.current = questionIndex;
-                    console.log(
-                      "[Live AI] Turn",
-                      aiTurnCountRef.current,
-                      "Question index",
-                      questionIndex,
-                    );
-                  }
-                  lastAiBurstAtRef.current = Date.now();
-                  heardAudioRef.current = true;
-                  audioQueueRef.current.push({ pcm, sampleRate: 24000 });
-                  playQueuedAudio();
-                }
-
-                if (part.text) {
-                  console.log("[Live AI]", part.text);
-                  setVoiceLog((prev) => [...prev, part.text]);
-                  if (part.text.includes(completionPhrase)) {
-                    console.log(
-                      "[Live AI] Completion phrase detected. Posting screening payload.",
-                    );
-                    handleCompletion().finally(() => {
-                      stopVoice();
-                    });
-                  }
-                }
-              });
-            }
-          },
-          onerror: (e) => {
-            setVoiceStatus("Error");
-            setVoiceLog((prev) => [...prev, `Error: ${e.message}`]);
-          },
-          onclose: (event) => {
-            isSessionOpenRef.current = false;
-            cleanupAudio();
-            setVoiceStatus("Closed");
-            if (event?.reason) {
-              setVoiceLog((prev) => [...prev, `Closed: ${event.reason}`]);
-            }
-          },
+      const signedUrlResp = await fetch(`${apiBase}/elevenlabs/signed-url`, {
+        headers: {
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         },
       });
+      if (!signedUrlResp.ok) throw new Error("Failed to fetch ElevenLabs signed URL");
+      const { signed_url } = await signedUrlResp.json();
+      if (!signed_url) throw new Error("ElevenLabs signed URL missing");
 
-      sessionRef.current = session;
-      isSessionOpenRef.current = true;
-      setVoiceStatus("Listening...");
-      voiceStartAtRef.current = Date.now();
-
-      if (!audioContextRef.current) {
-        const audioContext = new AudioContext();
-        audioContextRef.current = audioContext;
-        if (audioContext.state === "suspended") {
-          await audioContext.resume();
-        }
-      }
-
-      session.sendRealtimeInput({
-        text: "Tell the user now: 'We are collecting your face data for the next 10 seconds. Please keep your face centered and still.' Then wait for my camera done signal before asking screening questions.",
-      });
-      setVoiceLog((prev) => [
-        ...prev,
-        "Collecting face data for 10 seconds. Please keep your face centered and still.",
-      ]);
-      startupAudioNudgeTimerRef.current = setTimeout(() => {
-        if (!isSessionOpenRef.current || sessionRef.current !== session) return;
-        if (heardAudioRef.current) return;
-        session.sendRealtimeInput({
-          text: "Respond now in spoken audio.",
-        });
-      }, 3500);
-
-      try {
-        const videoBlob = await captureCameraClip();
-        const uploadResult = await uploadCameraClip(
-          checkinIdRef.current,
-          videoBlob,
-        );
-        const facialSymmetry = uploadResult?.facial_symmetry;
-        if (facialSymmetry?.status) {
-          const prefix =
-            facialSymmetry.status === "ERROR"
-              ? "Facial symmetry unavailable"
-              : `Facial symmetry ${facialSymmetry.status}`;
-          const detail = facialSymmetry.reason || "No details returned.";
-          setFacialSymmetryStatus(facialSymmetry.status);
-          setFacialSymmetryReason(detail);
-          setVoiceLog((prev) => [...prev, `${prefix}: ${detail}`]);
-        } else {
-          setFacialSymmetryStatus("Missing");
-          setFacialSymmetryReason(
-            "No facial symmetry payload was returned from backend.",
+      const conversation = await Conversation.startSession({
+        signedUrl: signed_url,
+        onStatusChange: ({ status: s }) => {
+          setVoiceStatus(
+            s === "connected"
+              ? "Listening..."
+              : s === "connecting"
+                ? "Connecting..."
+                : s === "disconnecting"
+                  ? "Stopping..."
+                  : s === "disconnected"
+                    ? "Idle"
+                    : s,
           );
+        },
+        onModeChange: ({ mode }) => {
+          lastModeRef.current = mode;
+
+          if (autoEndOnListeningRef.current && mode === "listening") {
+            autoEndOnListeningRef.current = false;
+            void stopVoice();
+            return;
+          }
+
+          // After the agent finishes the intro (speaking -> listening), record 10s camera.
+          if (
+            introPendingRef.current &&
+            !cameraStartedRef.current &&
+            mode === "listening"
+          ) {
+            introPendingRef.current = false;
+            cameraStartedRef.current = true;
+
+            uploadPromise = (async () => {
+              try {
+                await captureAndUploadCamera({
+                  uploadUrl: `${apiBase}/checkins/${checkinIdRef.current}/upload`,
+                  uploadHeaders: authToken
+                    ? { Authorization: `Bearer ${authToken}` }
+                    : {},
+                });
+              } catch (e) {
+                setCameraStatus("Error");
+                setFacialSymmetryStatus("Error");
+                setFacialSymmetryReason(
+                  e?.message || "Camera capture/upload failed.",
+                );
+              }
+
+              // Continue after the 10s camera step is done.
+              conversation.sendContextualUpdate(
+                "Camera done. Do not ask for the camera again. Continue now with the screening questions. Ask exactly these questions in order and wait for the user's spoken answer after each: (1) How are you feeling today? (2) Are you experiencing any dizziness, chest pain, or trouble breathing? (3) Did you take your morning medications? After they answer, say exactly: \"Thank you for your responses. The screening is now complete. Goodbye.\"",
+              );
+            })();
+          }
+
+          if (finalizePendingRef.current && mode === "listening") {
+            finalizePendingRef.current = false;
+            void finalizeSession({ uploadPromise });
+          }
+        },
+        onConnect: () => {
+          setVoiceLog((prev) => [...prev, "[ElevenLabs] Connected"]);
+        },
+        onDisconnect: (details) => {
+          console.error("[ElevenLabs] onDisconnect", details);
           setVoiceLog((prev) => [
             ...prev,
             `[ElevenLabs] Disconnected: ${details?.reason || "unknown"}`,
           ]);
-        }
-      } catch (error) {
-        setCameraStatus("Error");
-        setFacialSymmetryStatus("Error");
-        setFacialSymmetryReason(
-          error?.message || "Camera capture/upload failed.",
-        );
-        setVoiceLog((prev) => [
-          ...prev,
-          error?.message || "Camera capture failed.",
-        ]);
-      }
+          setIsVoiceLive(false);
+          startVoiceInFlightRef.current = false;
+        },
+        onError: (message, context) => {
+          setVoiceStatus("Error");
+          console.error("[ElevenLabs] onError", message, context);
+          setVoiceLog((prev) => [...prev, `[ElevenLabs] Error: ${message}`]);
+          startVoiceInFlightRef.current = false;
+        },
+        onMessage: ({ source, message }) => {
+          const text = String(message || "").trim();
+          if (!text) return;
 
-      const SpeechRecognition =
-        window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = false;
-        recognition.lang = "en-US";
-        recognition.onresult = (event) => {
-          const result = event.results[event.results.length - 1];
-          if (!result?.isFinal) return;
-          const transcript = result[0]?.transcript?.trim();
-          if (!transcript) return;
-          const idx = currentQuestionIndexRef.current;
-          const response = responsesRef.current[idx];
-          responsesRef.current[idx] = {
-            ...response,
-            transcript,
-            answer: normalizeAnswer(idx, transcript),
-          };
-          console.log("[User] Transcript", transcript);
-          const answeredCount = responsesRef.current.filter(
-            (item) => item.transcript,
-          ).length;
-          if (answeredCount >= responsesRef.current.length) {
-            maybePromptCompletion(session);
-          }
-        };
-        recognition.onerror = (event) => {
-          console.warn("[User] Speech recognition error", event?.error);
-        };
-        recognition.start();
-        recognitionRef.current = recognition;
-      } else {
-        console.warn(
-          "[User] Speech recognition not supported in this browser.",
-        );
-      }
+          if (source === "ai") {
+            setVoiceLog((prev) => [...prev, `AI: ${text}`]);
+            updateQuestionIndexFromAi(text);
 
-      completionTimerRef.current = setInterval(() => {
-        if (!heardAudioRef.current || completionSentRef.current) {
-          return;
-        }
-        const lastAudioAt = lastAudioAtRef.current;
-        if (!lastAudioAt) return;
-        const idleMs = Date.now() - lastAudioAt;
-        const startedAt = voiceStartAtRef.current ?? 0;
-        const sessionMs = Date.now() - startedAt;
-        const lastAiAt = lastAiAudioAtRef.current;
-        const aiIdleMs = lastAiAt ? Date.now() - lastAiAt : 0;
-        const answeredCount = responsesRef.current.filter(
-          (item) => item.transcript,
-        ).length;
-
-        if (
-          answeredCount >= responsesRef.current.length &&
-          !completionPromptedRef.current &&
-          aiIdleMs >= 1500
-        ) {
-          maybePromptCompletion(session);
-          return;
-        }
-
-        if (completionPromptedRef.current) {
-          const promptedAt = completionPromptAtRef.current ?? Date.now();
-          const promptAgeMs = Date.now() - promptedAt;
-          if (aiIdleMs >= 4500 && promptAgeMs >= 4500) {
-            completionSentRef.current = true;
-            console.log(
-              "[Live AI] Final message window elapsed. Posting screening payload.",
-            );
-            handleCompletion().finally(() => {
-              stopVoice();
-            });
-          }
-          return;
-        }
-
-        if (aiTurnCountRef.current >= 4 && idleMs >= 6000 && sessionMs >= 18000) {
-          maybePromptCompletion(session);
-        }
-      }, 500);
-
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
-        micStreamRef.current = stream;
-
-        const audioContext = audioContextRef.current;
-        if (!audioContext) {
-          throw new Error("Audio context missing");
-        }
-
-        const source = audioContext.createMediaStreamSource(stream);
-        const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-        processor.onaudioprocess = (event) => {
-          if (!isSessionOpenRef.current || sessionRef.current !== session) {
-            return;
-          }
-          const input = event.inputBuffer.getChannelData(0);
-          let rms = 0;
-          for (let i = 0; i < input.length; i += 1) {
-            rms += input[i] * input[i];
-          }
-          rms = Math.sqrt(rms / input.length);
-          if (rms > 0.01) {
-            lastUserAudioAtRef.current = Date.now();
-            if (!userSpeakingRef.current) {
-              userSpeakingRef.current = true;
-              userSpeechStartRef.current = Date.now();
-              console.log("[User] Speech started");
+            const answeredCount = responsesRef.current.filter(
+              (item) => item.transcript,
+            ).length;
+            const sawCompletion =
+              text.replace(/\s+/g, " ").trim() ===
+              completionPhrase.replace(/\s+/g, " ").trim();
+            if (sawCompletion && answeredCount >= responsesRef.current.length) {
+              if (lastModeRef.current === "listening") {
+                void finalizeSession({ uploadPromise });
+              } else {
+                finalizePendingRef.current = true;
+                if (finalizeTimeoutRef.current) {
+                  clearTimeout(finalizeTimeoutRef.current);
+                }
+                finalizeTimeoutRef.current = setTimeout(() => {
+                  finalizePendingRef.current = false;
+                  void finalizeSession({ uploadPromise });
+                }, 9000);
+              }
             }
-          } else if (userSpeakingRef.current) {
-            userSpeakingRef.current = false;
-            const startedAt = userSpeechStartRef.current ?? Date.now();
-            const durationMs = Date.now() - startedAt;
-            console.log(
-              "[User] Speech ended",
-              `${Math.round(durationMs / 100) / 10}s`,
-            );
-            userSpeechStartRef.current = null;
-          }
-          const resampled = resampleTo16k(input, audioContext.sampleRate);
-          const pcm16 = floatToInt16(resampled);
-          const base64Audio = encodeToBase64(pcm16);
-          session.sendRealtimeInput({
-            audio: {
-              data: base64Audio,
-              mimeType: "audio/pcm;rate=16000",
-            },
-          });
-        };
-
-        source.connect(processor);
-        processor.connect(audioContext.destination);
-        processorRef.current = processor;
-
-        setTimeout(() => {
-          if (!isSessionOpenRef.current || sessionRef.current !== session) {
             return;
           }
-          session.sendRealtimeInput({
-            text: "Camera done. Begin the screening questions now.",
-          });
-        }, 200);
-      } catch (error) {
-        setVoiceStatus("Error");
-        setVoiceLog((prev) => [...prev, error?.message || "Mic setup failed."]);
-        stopVoice();
-      }
+
+          if (source === "user") {
+            if (lastUserMessageRef.current === text) return;
+            lastUserMessageRef.current = text;
+            setVoiceLog((prev) => [...prev, `YOU: ${text}`]);
+
+            const idx = currentQuestionIndexRef.current;
+            const response =
+              responsesRef.current[idx] || responsesRef.current[0];
+            const mergedTranscript = response.transcript
+              ? `${response.transcript} ${text}`.trim()
+              : text;
+            responsesRef.current[idx] = {
+              ...response,
+              transcript: mergedTranscript,
+              answer: normalizeAnswer(idx, mergedTranscript),
+            };
+          }
+        },
+      });
+
+      convoRef.current = conversation;
+      conversation.sendContextualUpdate(
+        "Say this first, then stop and wait silently: 'Hi, I am going to start your daily health check-in. Please look at the camera now and keep your face centered and still.' Do not ask any questions yet. Wait for my next instruction.",
+      );
+      introPendingRef.current = true;
     } catch (error) {
       setVoiceStatus("Error");
       setVoiceLog((prev) => [...prev, error?.message || "Voice setup failed."]);
@@ -745,8 +503,6 @@ export default function useCheckin(authUser, authToken) {
   return {
     status,
     reason,
-    isDemoMode,
-    setIsDemoMode,
     voiceStatus,
     voiceLog,
     isVoiceLive,
