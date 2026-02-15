@@ -1,14 +1,20 @@
 """Check-in management routes."""
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.auth import require_current_user
-from app.dependencies import get_checkins_collection, get_screenings_collection
+from app.dependencies import (
+    get_checkins_collection,
+    get_screenings_collection,
+    get_users_collection,
+)
 from app.models.checkin import (
     Answers,
     CheckinStartRequest,
@@ -28,9 +34,11 @@ from app.services.facial_symmetry import (
     build_facial_symmetry_metrics,
 )
 from app.services.screening import build_screening_transcript
+from app.services.stt_assessment import assess_checkin_with_stt
 from app.vhr import analyze_uploaded_video
 
 router = APIRouter()
+logger = logging.getLogger("guardian")
 
 # In-memory cache for active check-ins
 CHECKINS: Dict[str, Dict[str, object]] = {}
@@ -127,6 +135,106 @@ def _parse_duration_ms(metadata: Optional[str]) -> int:
         return 10000
 
 
+def _triage_reasons_from_stt_items(items: list[dict]) -> list[str]:
+    """
+    Best-effort extraction of triage reasons from backend/logs/stt.json.
+    stt.json is overwritten, so this is only used when email matches the check-in user.
+    """
+
+    def _ans(idx: int) -> str:
+        try:
+            return str(items[idx].get("answer") or "").strip().lower()
+        except Exception:
+            return ""
+
+    reasons: list[str] = []
+
+    # Q2 is expected to be symptoms.
+    symptoms = _ans(1)
+    if "dizz" in symptoms:
+        reasons.append("Reported dizziness (speech)")
+    if "chest" in symptoms:
+        reasons.append("Reported chest pain (speech)")
+    if "breath" in symptoms or "shortness" in symptoms:
+        reasons.append("Reported trouble breathing (speech)")
+
+    # Q3 is expected to be medications.
+    meds = _ans(2)
+    if meds and any(tok in meds for tok in ("no", "not", "forgot", "didn't", "didnt")):
+        reasons.append("Medication not taken (speech)")
+
+    return reasons
+
+
+def _maybe_merge_stt_reasons(checkin: dict, triage_reasons: list[str]) -> list[str]:
+    """
+    Merge derived triage reasons from stt.json into triage_reasons.
+    """
+    try:
+        user_id = checkin.get("user_id")
+        if not user_id:
+            return triage_reasons
+
+        stt_path = Path(__file__).resolve().parents[2] / "logs" / "stt.json"
+        if not stt_path.exists():
+            return triage_reasons
+        stt_payload = json.loads(stt_path.read_text(encoding="utf-8"))
+        stt_user_id = str(stt_payload.get("user_id") or "").strip()
+        if not stt_user_id or stt_user_id != str(user_id):
+            return triage_reasons
+
+        items = stt_payload.get("items") or []
+        if not isinstance(items, list):
+            return triage_reasons
+
+        derived = _triage_reasons_from_stt_items(items)
+        if not derived:
+            return triage_reasons
+
+        existing = {str(r).strip().lower() for r in triage_reasons if str(r).strip()}
+        merged = list(triage_reasons)
+        for r in derived:
+            if r.strip().lower() not in existing:
+                merged.append(r)
+        return merged
+    except Exception:
+        return triage_reasons
+
+
+def _load_stt_items_for_checkin_user(checkin: dict) -> list[dict]:
+    """
+    Load backend/logs/stt.json if it belongs to the user who created this check-in.
+    The file is overwritten each run; this check prevents cross-user leakage.
+    """
+    try:
+        user_id = checkin.get("user_id")
+        if not user_id:
+            return []
+
+        stt_path = Path(__file__).resolve().parents[2] / "logs" / "stt.json"
+        if not stt_path.exists():
+            return []
+
+        stt_payload = json.loads(stt_path.read_text(encoding="utf-8"))
+        stt_user_id = str(stt_payload.get("user_id") or "").strip()
+        if stt_user_id and stt_user_id != str(user_id):
+            return []
+        # Backward-compat: older stt.json used email; keep this as a fallback.
+        if not stt_user_id and stt_payload.get("email"):
+            user = get_users_collection().find_one({"_id": user_id})
+            user_email = str((user or {}).get("email") or "").strip().lower()
+            stt_email = str(stt_payload.get("email") or "").strip().lower()
+            if not user_email or stt_email != user_email:
+                return []
+
+        items = stt_payload.get("items") or []
+        if not isinstance(items, list):
+            return []
+        return [i for i in items if isinstance(i, dict)]
+    except Exception:
+        return []
+
+
 def _triage_status_from_db(value: Optional[str]) -> Optional[TriageStatus]:
     """Convert database triage value to enum."""
     if not value:
@@ -161,6 +269,7 @@ def _load_checkin(checkin_id: str) -> Optional[Dict[str, object]]:
         "triage_reasons": doc.get("triage_reasons", []),
         "transcript": doc.get("transcript"),
         "user_id": doc.get("user_id"),
+        "ai_assessment": doc.get("ai_assessment"),
     }
 
     if doc.get("facial_symmetry_raw"):
@@ -440,9 +549,49 @@ def complete_checkin(
             for e in blocking_errors
         ]
 
+    # Gemini assessment at check-in time (preferred over substring-based heuristics).
+    stt_items = _load_stt_items_for_checkin_user(checkin)
+    ai_assessment = assess_checkin_with_stt(
+        stt_items=stt_items,
+        answers=payload.answers.model_dump(),
+        transcript=transcript,
+        facial_symmetry=facial_symmetry.model_dump() if facial_symmetry else None,
+        heart_rate=checkin.get("heart_rate") if isinstance(checkin.get("heart_rate"), dict) else None,
+    )
+    checkin["ai_assessment"] = ai_assessment
+    try:
+        logger.info(
+            "checkin_ai_assessment generated checkin_id=%s model=%s has_stt=%s",
+            checkin_id,
+            (ai_assessment or {}).get("model") if isinstance(ai_assessment, dict) else None,
+            bool(stt_items),
+        )
+    except Exception:
+        pass
+
+    # Optionally enrich triage reasons from AI signals (handles negation vs. substring matches).
+    try:
+        signals = ai_assessment.get("signals") if isinstance(ai_assessment, dict) else None
+        if isinstance(signals, dict):
+            derived: list[str] = []
+            if signals.get("chest_pain") == "present" or signals.get("trouble_breathing") == "present":
+                derived.append("Speech indicates a red-flag symptom")
+            if signals.get("dizziness") == "present":
+                derived.append("Speech indicates dizziness")
+            if signals.get("medication_missed") == "present":
+                derived.append("Speech indicates medications were missed")
+
+            if derived:
+                existing = {str(r).strip().lower() for r in triage_reasons if str(r).strip()}
+                for r in derived:
+                    if r.strip().lower() not in existing:
+                        triage_reasons = list(triage_reasons) + [r]
+    except Exception:
+        pass
+
     triage_status_db = triage_status.value.lower()
 
-    get_checkins_collection().update_one(
+    update_result = get_checkins_collection().update_one(
         {"checkin_id": checkin_id},
         {
             "$set": {
@@ -454,6 +603,7 @@ def complete_checkin(
                 "screening_session_id": screening_session_id or None,
                 "screening_responses": screening_responses or [],
                 "transcript": transcript or None,
+                "ai_assessment": ai_assessment,
                 "user_message": "Check-in completed.",
                 "clinician_notes": "",
                 "alert_level": None,
@@ -464,6 +614,19 @@ def complete_checkin(
             }
         },
     )
+    if getattr(update_result, "matched_count", 0) != 1:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Check-in completion did not match a DB document for checkin_id={checkin_id}",
+        )
+    try:
+        logger.info(
+            "checkin_completed persisted checkin_id=%s modified=%s",
+            checkin_id,
+            getattr(update_result, "modified_count", None),
+        )
+    except Exception:
+        pass
 
     return CheckinResult(
         checkin_id=checkin_id,
@@ -603,4 +766,5 @@ def get_checkin(checkin_id: str) -> CheckinDetail:
         transcript=checkin.get("transcript"),
         facial_symmetry=checkin.get("facial_symmetry"),
         heart_rate=checkin.get("heart_rate"),
+        ai_assessment=checkin.get("ai_assessment"),
     )

@@ -32,6 +32,7 @@ export default function useCheckin(authUser, authToken) {
   const convoRef = useRef(null);
   const checkinIdRef = useRef(null);
   const isSessionOpenRef = useRef(false);
+  const startVoiceInFlightRef = useRef(false);
   const lastUserMessageRef = useRef(null);
   const lastModeRef = useRef("listening");
   const finalizePendingRef = useRef(false);
@@ -42,51 +43,8 @@ export default function useCheckin(authUser, authToken) {
   const currentQuestionIndexRef = useRef(0);
   const responsesRef = useRef(INITIAL_RESPONSES.map((item) => ({ ...item })));
 
-  const startCheckin = async () => {
-    setStatus("Starting");
-    setReason("Creating a new check-in...");
-
-    try {
-      const response = await fetch(`${apiBase}/checkins/start`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-        },
-        body: JSON.stringify({}),
-      });
-
-      if (!response.ok) throw new Error("Failed to start check-in");
-      const data = await response.json();
-
-      const completeResponse = await fetch(
-        `${apiBase}/checkins/${data.checkin_id}/complete`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-          },
-          body: JSON.stringify({
-            answers: {
-              dizziness: false,
-              chest_pain: false,
-              trouble_breathing: false,
-            },
-            transcript: "Feeling ok today.",
-          }),
-        },
-      );
-      if (!completeResponse.ok) throw new Error("Failed to complete check-in");
-
-      const result = await completeResponse.json();
-      setStatus(result.triage_status);
-      setReason(result.triage_reasons.join("; "));
-    } catch (error) {
-      setStatus("Error");
-      setReason(error?.message || "Something went wrong.");
-    }
-  };
+  // Note: we no longer create a "dummy" check-in here. That was generating an extra
+  // check-in history entry. The real flow happens via `startVoice()`.
 
   const stopVoice = async () => {
     // If the ElevenLabs SDK reports disconnect reason "user", it means we called endSession().
@@ -109,6 +67,7 @@ export default function useCheckin(authUser, authToken) {
     convoRef.current = null;
     setIsVoiceLive(false);
     setVoiceStatus("Idle");
+    startVoiceInFlightRef.current = false;
   };
 
   const finalizeSession = async ({ uploadPromise }) => {
@@ -217,8 +176,9 @@ export default function useCheckin(authUser, authToken) {
   };
 
   const saveQaJson = async () => {
-    const items = responsesRef.current.map((r) => ({
-      question: r?.q ?? "",
+    // Ensure the saved JSON always includes the canonical question text.
+    const items = responsesRef.current.map((r, idx) => ({
+      question: r?.q ?? INITIAL_RESPONSES[idx]?.q ?? "",
       answer: r?.transcript ?? "",
     }));
 
@@ -229,7 +189,6 @@ export default function useCheckin(authUser, authToken) {
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       },
       body: JSON.stringify({
-        email: authUser?.email ?? null,
         items,
       }),
     });
@@ -299,7 +258,8 @@ export default function useCheckin(authUser, authToken) {
   };
 
   const startVoice = async () => {
-    if (isVoiceLive) return;
+    if (isVoiceLive || startVoiceInFlightRef.current) return;
+    startVoiceInFlightRef.current = true;
     setIsVoiceLive(true);
     setVoiceStatus("Connecting...");
     setVoiceLog([]);
@@ -399,7 +359,7 @@ export default function useCheckin(authUser, authToken) {
 
               // Continue after the 10s camera step is done.
               conversation.sendContextualUpdate(
-                "Camera done. Continue now with the screening questions. Ask exactly these questions in order and wait for the user's spoken answer after each: (1) How are you feeling today? (2) Are you experiencing any dizziness, chest pain, or trouble breathing? (3) Did you take your morning medications? After they answer, say exactly: \"Thank you for your responses. The screening is now complete. Goodbye.\"",
+                "Camera done. Do not ask for the camera again. Continue now with the screening questions. Ask exactly these questions in order and wait for the user's spoken answer after each: (1) How are you feeling today? (2) Are you experiencing any dizziness, chest pain, or trouble breathing? (3) Did you take your morning medications? After they answer, say exactly: \"Thank you for your responses. The screening is now complete. Goodbye.\"",
               );
             })();
           }
@@ -421,11 +381,13 @@ export default function useCheckin(authUser, authToken) {
             `[ElevenLabs] Disconnected: ${details?.reason || "unknown"}`,
           ]);
           setIsVoiceLive(false);
+          startVoiceInFlightRef.current = false;
         },
         onError: (message, context) => {
           setVoiceStatus("Error");
           console.error("[ElevenLabs] onError", message, context);
           setVoiceLog((prev) => [...prev, `[ElevenLabs] Error: ${message}`]);
+          startVoiceInFlightRef.current = false;
         },
         onMessage: ({ source, message }) => {
           const text = String(message || "").trim();
@@ -491,13 +453,14 @@ export default function useCheckin(authUser, authToken) {
       convoRef.current = conversation;
 
       conversation.sendContextualUpdate(
-        "Say this first, then stop and wait silently: 'Hi, I am going to start your daily health check-in. First, please look at the camera and keep your face centered and still.' Do not ask any questions yet. Wait for my next instruction.",
+        "Say this first, then stop and wait silently: 'Hi, I am going to start your daily health check-in. Please look at the camera now and keep your face centered and still.' Do not ask any questions yet. Wait for my next instruction.",
       );
       introPendingRef.current = true;
     } catch (error) {
       setVoiceStatus("Error");
       setVoiceLog((prev) => [...prev, error?.message || "Voice setup failed."]);
       setIsVoiceLive(false);
+      startVoiceInFlightRef.current = false;
     }
   };
 
@@ -513,7 +476,6 @@ export default function useCheckin(authUser, authToken) {
     facialSymmetryStatus,
     facialSymmetryReason,
     cameraVideoRef,
-    startCheckin,
     startVoice,
     stopVoice,
   };

@@ -14,7 +14,6 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
     facialSymmetryStatus,
     facialSymmetryReason,
     cameraVideoRef,
-    startCheckin,
     startVoice,
     stopVoice,
   } = useCheckin(authUser, authToken);
@@ -53,9 +52,10 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
           <div className="mt-6 flex flex-wrap items-center gap-4">
             <button
               className="rounded-full bg-clay px-6 py-3 text-base font-semibold text-white shadow-lg shadow-orange-200/60 transition hover:-translate-y-0.5"
-              onClick={startCheckin}
+              onClick={startVoice}
+              disabled={isVoiceLive}
             >
-              Start Check-In
+              {isVoiceLive ? "Session running..." : "Start Check-In"}
             </button>
             <label className="flex items-center gap-2 text-sm text-stone-700">
               <input
@@ -103,13 +103,6 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
                 {facialSymmetryReason}
               </p>
               <div className="mt-4 flex flex-wrap gap-3">
-                <button
-                  className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
-                  onClick={startVoice}
-                  disabled={isVoiceLive}
-                >
-                  Start session
-                </button>
                 <button
                   className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
                   onClick={stopVoice}

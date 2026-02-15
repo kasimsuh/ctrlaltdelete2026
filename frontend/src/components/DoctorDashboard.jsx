@@ -21,15 +21,11 @@ const buildTriageCounts = (checkins) =>
 const buildSignalCounts = (checkins) =>
   checkins.reduce(
     (acc, checkin) => {
-      const signalText = `${checkin.transcript || ""} ${(checkin.triage_reasons || []).join(" ")}`
-        .toLowerCase()
-        .trim();
-      if (signalText.includes("dizz")) acc.dizziness += 1;
-      if (signalText.includes("chest")) acc.chest_pain += 1;
-      if (signalText.includes("breath")) acc.breathing += 1;
-      if (signalText.includes("med") && (signalText.includes("miss") || signalText.includes("not"))) {
-        acc.medication_missed += 1;
-      }
+      const signals = checkin?.ai_assessment?.signals || {};
+      if (signals.dizziness === "present") acc.dizziness += 1;
+      if (signals.chest_pain === "present") acc.chest_pain += 1;
+      if (signals.trouble_breathing === "present") acc.breathing += 1;
+      if (signals.medication_missed === "present") acc.medication_missed += 1;
       return acc;
     },
     { dizziness: 0, chest_pain: 0, breathing: 0, medication_missed: 0 },
@@ -118,25 +114,19 @@ export default function DoctorDashboard({ authUser, authToken, logout }) {
         triageCounts,
       };
 
-      let summaryData = null;
-      try {
-        const summaryResponse = await apiFetch("/reports/senior-summary", {
-          method: "POST",
-          token: authToken,
-          body: buildReportPayload({ senior, checkins, stats, signals }),
-        });
-        summaryData = summaryResponse || null;
-      } catch (aiError) {
-        console.error("[DoctorDashboard] Failed to generate AI summary", aiError);
-        summaryData = null;
-      }
+      // AI assessment is generated at check-in completion and stored in Mongo.
+      // Avoid generating summaries on report-open (reduces latency + avoids substring heuristics).
+      const summaryData = checkins[0]?.ai_assessment || null;
 
       setReportData({
         checkins,
         stats,
         signals,
         summaryData,
-        generatedAt: new Date().toLocaleString(),
+        generatedAt:
+          summaryData?.generated_at
+            ? formatDateTime(summaryData.generated_at)
+            : new Date().toLocaleString(),
       });
     } catch (err) {
       setReportError(err?.message || "Failed to load report data");

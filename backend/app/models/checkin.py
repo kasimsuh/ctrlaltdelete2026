@@ -93,6 +93,8 @@ class CheckinDetail(BaseModel):
     transcript: Optional[str] = None
     facial_symmetry: Optional[FacialSymmetryResult] = None
     heart_rate: Optional[HeartRateResult] = None
+    # Gemini assessment stored at check-in completion time (doctor dashboard reads this directly).
+    ai_assessment: Optional[Dict[str, Any]] = None
 
 
 class CheckinListResponse(BaseModel):

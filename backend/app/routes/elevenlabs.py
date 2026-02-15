@@ -30,6 +30,7 @@ class QAPair(BaseModel):
 
 
 class QASaveRequest(BaseModel):
+    # Deprecated: kept for backward-compat with older frontend builds.
     email: Optional[str] = None
     items: List[QAPair]
 
@@ -114,7 +115,7 @@ def save_qa_json(
 ) -> QASaveResponse:
     """
     Overwrite a single JSON file containing only:
-      - email
+      - user_id
       - items: [{question, answer}]
     """
     if user is None:
@@ -125,7 +126,7 @@ def save_qa_json(
     path = logs_dir / "stt.json"
 
     body = {
-        "email": payload.email or user.get("email"),
+        "user_id": str(user.get("_id")),
         "items": [{"question": i.question, "answer": i.answer} for i in payload.items],
     }
     path.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
