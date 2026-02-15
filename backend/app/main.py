@@ -16,6 +16,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+import pymongo
+
+from app.auth import (
+    require_current_user,
+    ensure_user_indexes,
+    create_user,
+    authenticate_user,
+    create_access_token,
+)
+from app.db import mongo_check
+
+# Ensure backend/.env is loaded regardless of launch directory.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 app = FastAPI(title="Guardian Check-In API", version="0.1.0")
 

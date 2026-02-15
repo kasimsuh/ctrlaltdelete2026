@@ -11,7 +11,7 @@ const systemInstruction = `ROLE: You are a professional Medical Screening Assist
 OBJECTIVE: Conduct a brief well-being check by asking specific questions.
 RULES:
 1. First ask the user to look at their camera for 10 seconds and wait for a "camera done" signal.
-2. Then ask: "How are you feeling today?"
+2. Then  tell them you are about to ask them some questions on their general wellbeing.First ask: "How are you feeling today?"
 3. Follow up with: "Are you experiencing any dizziness, chest pain, or trouble breathing?"
 4. Finally ask: "Did you take your morning medications?"
 5. STRICT: Only ask these questions. If the user tries to change the subject, politely redirect them back to the screening.
@@ -24,10 +24,11 @@ const statusColor = {
   Yellow: "bg-amber-100 text-gold",
   Red: "bg-rose-100 text-rose",
   Error: "bg-rose-100 text-rose",
-  neutral: "bg-amber-50 text-stone-600"
+  neutral: "bg-amber-50 text-stone-600",
 };
 
-const completionPhrase = "Thank you for your responses. The screening is now complete. Goodbye.";
+const completionPhrase =
+  "Thank you for your responses. The screening is now complete. Goodbye.";
 
 const TOKEN_STORAGE_KEY = "guardian_checkin.jwt";
 
@@ -96,8 +97,23 @@ const normalizeAnswer = (questionIndex, text) => {
   if (noTerms.some((term) => textLower.includes(term))) return false;
 
   if (questionIndex === 0) {
-    const positiveTerms = ["good", "fine", "okay", "ok", "well", "great", "better"];
-    const negativeTerms = ["bad", "not good", "sick", "unwell", "awful", "worse"];
+    const positiveTerms = [
+      "good",
+      "fine",
+      "okay",
+      "ok",
+      "well",
+      "great",
+      "better",
+    ];
+    const negativeTerms = [
+      "bad",
+      "not good",
+      "sick",
+      "unwell",
+      "awful",
+      "worse",
+    ];
     if (positiveTerms.some((term) => textLower.includes(term))) return true;
     if (negativeTerms.some((term) => textLower.includes(term))) return false;
   }
@@ -132,7 +148,7 @@ export default function App() {
   const [cameraStatus, setCameraStatus] = useState("Idle");
   const [facialSymmetryStatus, setFacialSymmetryStatus] = useState("Not run");
   const [facialSymmetryReason, setFacialSymmetryReason] = useState(
-    "Facial symmetry results will appear after camera upload."
+    "Facial symmetry results will appear after camera upload.",
   );
 
   const sessionRef = useRef(null);
@@ -149,6 +165,9 @@ export default function App() {
   const heardAudioRef = useRef(false);
   const completionSentRef = useRef(false);
   const completionTimerRef = useRef(null);
+  const startupAudioNudgeTimerRef = useRef(null);
+  const completionPromptedRef = useRef(false);
+  const completionPromptAtRef = useRef(null);
   const voiceStartAtRef = useRef(null);
   const lastUserAudioAtRef = useRef(null);
   const lastAiAudioAtRef = useRef(null);
@@ -159,8 +178,16 @@ export default function App() {
   const currentQuestionIndexRef = useRef(0);
   const responsesRef = useRef([
     { q: "How are you feeling today?", answer: null, transcript: null },
-    { q: "Are you experiencing any dizziness, chest pain, or trouble breathing?", answer: null, transcript: null },
-    { q: "Did you take your morning medications?", answer: null, transcript: null }
+    {
+      q: "Are you experiencing any dizziness, chest pain, or trouble breathing?",
+      answer: null,
+      transcript: null,
+    },
+    {
+      q: "Did you take your morning medications?",
+      answer: null,
+      transcript: null,
+    },
   ]);
   const recognitionRef = useRef(null);
 
@@ -212,7 +239,7 @@ export default function App() {
         if (!firstName || !lastName) {
           throw new Error("First name and last name are required");
         }
-        if(!email.includes("@gmail.com")) {
+        if (!email.includes("@gmail.com")) {
           throw new Error("Please use a valid Gmail address");
         }
         await Auth.register({ firstName, lastName, email, password });
@@ -221,9 +248,9 @@ export default function App() {
       const { access_token } = await Auth.login({ email, password });
       persistToken(access_token);
       await refreshMe(access_token);
-      setAuthPassword("");      
+      setAuthPassword("");
       setAuthFirstName("");
-      setAuthLastName("");    
+      setAuthLastName("");
     } catch (err) {
       setAuthError(err?.message || "Auth failed");
     } finally {
@@ -245,7 +272,7 @@ export default function App() {
       const response = await fetch(`${apiBase}/checkins/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ demo_mode: isDemoMode })
+        body: JSON.stringify({ demo_mode: isDemoMode }),
       });
 
       if (!response.ok) {
@@ -253,18 +280,21 @@ export default function App() {
       }
 
       const data = await response.json();
-      const completeResponse = await fetch(`${apiBase}/checkins/${data.checkin_id}/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          answers: {
-            dizziness: false,
-            chest_pain: false,
-            trouble_breathing: false
-          },
-          transcript: "Feeling ok today."
-        })
-      });
+      const completeResponse = await fetch(
+        `${apiBase}/checkins/${data.checkin_id}/complete`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            answers: {
+              dizziness: false,
+              chest_pain: false,
+              trouble_breathing: false,
+            },
+            transcript: "Feeling ok today.",
+          }),
+        },
+      );
 
       if (!completeResponse.ok) {
         throw new Error("Failed to complete check-in");
@@ -285,16 +315,26 @@ export default function App() {
       clearInterval(completionTimerRef.current);
       completionTimerRef.current = null;
     }
+    if (startupAudioNudgeTimerRef.current) {
+      clearTimeout(startupAudioNudgeTimerRef.current);
+      startupAudioNudgeTimerRef.current = null;
+    }
     lastAudioAtRef.current = null;
     lastAiAudioAtRef.current = null;
     lastAiBurstAtRef.current = null;
     heardAudioRef.current = false;
     completionSentRef.current = false;
+    completionPromptedRef.current = false;
+    completionPromptAtRef.current = null;
     aiTurnCountRef.current = 0;
     userSpeakingRef.current = false;
     userSpeechStartRef.current = null;
     currentQuestionIndexRef.current = 0;
-    responsesRef.current = responsesRef.current.map((item) => ({ ...item, answer: null, transcript: null }));
+    responsesRef.current = responsesRef.current.map((item) => ({
+      ...item,
+      answer: null,
+      transcript: null,
+    }));
     if (recognitionRef.current) {
       recognitionRef.current.stop();
       recognitionRef.current = null;
@@ -337,20 +377,32 @@ export default function App() {
       timestamp: new Date().toISOString(),
       senior_id: "demo-senior",
       checkin_id: checkinIdRef.current,
-      responses: responsesRef.current
+      responses: responsesRef.current,
     };
 
     await fetch(`${apiBase}/screenings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(screeningData)
+      body: JSON.stringify(screeningData),
     });
   };
 
-  
+  const maybePromptCompletion = (session) => {
+    if (!session || completionPromptedRef.current) return;
+    completionPromptedRef.current = true;
+    completionPromptAtRef.current = Date.now();
+    setVoiceLog((prev) => [...prev, "Requesting final closing message..."]);
+    session.sendRealtimeInput({
+      text: `All screening questions are complete. Say exactly this sentence now: "${completionPhrase}"`,
+    });
+  };
+
   const captureCameraClip = async () => {
     setCameraStatus("Recording 10s...");
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false,
+    });
     cameraStreamRef.current = stream;
     if (cameraVideoRef.current) {
       cameraVideoRef.current.srcObject = stream;
@@ -358,7 +410,10 @@ export default function App() {
     const preferredType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
       ? "video/webm;codecs=vp8"
       : "video/webm";
-    const recorder = new MediaRecorder(stream, preferredType ? { mimeType: preferredType } : undefined);
+    const recorder = new MediaRecorder(
+      stream,
+      preferredType ? { mimeType: preferredType } : undefined,
+    );
     const chunks = [];
 
     return await new Promise((resolve, reject) => {
@@ -391,10 +446,13 @@ export default function App() {
     setCameraStatus("Uploading...");
     const formData = new FormData();
     formData.append("video", videoBlob, "checkin.webm");
-    formData.append("metadata", JSON.stringify({ duration_ms: cameraDurationMs }));
+    formData.append(
+      "metadata",
+      JSON.stringify({ duration_ms: cameraDurationMs }),
+    );
     const response = await fetch(`${apiBase}/checkins/${checkinId}/upload`, {
       method: "POST",
-      body: formData
+      body: formData,
     });
     if (!response.ok) {
       let detail = "Failed to upload camera clip";
@@ -443,13 +501,16 @@ export default function App() {
     setVoiceStatus("Connecting...");
     setVoiceLog([]);
     setFacialSymmetryStatus("Pending");
-    setFacialSymmetryReason("Camera capture in progress. Waiting for backend analysis.");
+    setFacialSymmetryReason("Camera capture in progress...");
 
     try {
       const checkinResponse = await fetch(`${apiBase}/checkins/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ demo_mode: isDemoMode, senior_id: "demo-senior" })
+        body: JSON.stringify({
+          demo_mode: isDemoMode,
+          senior_id: "demo-senior",
+        }),
       });
       if (!checkinResponse.ok) {
         throw new Error("Failed to start check-in");
@@ -457,7 +518,9 @@ export default function App() {
       const checkinData = await checkinResponse.json();
       checkinIdRef.current = checkinData.checkin_id;
 
-      const tokenResponse = await fetch(`${apiBase}/auth/ephemeral`, { method: "POST" });
+      const tokenResponse = await fetch(`${apiBase}/auth/ephemeral`, {
+        method: "POST",
+      });
       if (!tokenResponse.ok) {
         throw new Error("Failed to fetch ephemeral token");
       }
@@ -465,14 +528,14 @@ export default function App() {
 
       const ai = new GoogleGenAI({
         apiKey: tokenData.token,
-        httpOptions: { apiVersion: "v1alpha" }
+        httpOptions: { apiVersion: "v1alpha" },
       });
       const session = await ai.live.connect({
         model: modelName,
         httpOptions: { apiVersion: "v1alpha" },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction
+          systemInstruction,
         },
         callbacks: {
           onmessage: (message) => {
@@ -484,11 +547,25 @@ export default function App() {
                   const pcm = decodeBase64ToInt16(part.inlineData.data);
                   lastAudioAtRef.current = Date.now();
                   lastAiAudioAtRef.current = Date.now();
-                  if (!lastAiBurstAtRef.current || Date.now() - lastAiBurstAtRef.current > 1000) {
+                  if (
+                    !lastAiBurstAtRef.current ||
+                    Date.now() - lastAiBurstAtRef.current > 1000
+                  ) {
                     aiTurnCountRef.current += 1;
-                    const questionIndex = Math.max(0, Math.min(aiTurnCountRef.current - 2, responsesRef.current.length - 1));
+                    const questionIndex = Math.max(
+                      0,
+                      Math.min(
+                        aiTurnCountRef.current - 2,
+                        responsesRef.current.length - 1,
+                      ),
+                    );
                     currentQuestionIndexRef.current = questionIndex;
-                    console.log("[Live AI] Turn", aiTurnCountRef.current, "Question index", questionIndex);
+                    console.log(
+                      "[Live AI] Turn",
+                      aiTurnCountRef.current,
+                      "Question index",
+                      questionIndex,
+                    );
                   }
                   lastAiBurstAtRef.current = Date.now();
                   heardAudioRef.current = true;
@@ -500,7 +577,9 @@ export default function App() {
                   console.log("[Live AI]", part.text);
                   setVoiceLog((prev) => [...prev, part.text]);
                   if (part.text.includes(completionPhrase)) {
-                    console.log("[Live AI] Completion phrase detected. Posting screening payload.");
+                    console.log(
+                      "[Live AI] Completion phrase detected. Posting screening payload.",
+                    );
                     handleCompletion().finally(() => {
                       stopVoice();
                     });
@@ -520,8 +599,8 @@ export default function App() {
             if (event?.reason) {
               setVoiceLog((prev) => [...prev, `Closed: ${event.reason}`]);
             }
-          }
-        }
+          },
+        },
       });
 
       sessionRef.current = session;
@@ -538,16 +617,26 @@ export default function App() {
       }
 
       session.sendRealtimeInput({
-        text: "Tell the user now: 'We are collecting your face data for the next 10 seconds. Please keep your face centered and still.' Then wait for my camera done signal before asking screening questions."
+        text: "Tell the user now: 'We are collecting your face data for the next 10 seconds. Please keep your face centered and still.' Then wait for my camera done signal before asking screening questions.",
       });
       setVoiceLog((prev) => [
         ...prev,
-        "Collecting face data for 10 seconds. Please keep your face centered and still."
+        "Collecting face data for 10 seconds. Please keep your face centered and still.",
       ]);
+      startupAudioNudgeTimerRef.current = setTimeout(() => {
+        if (!isSessionOpenRef.current || sessionRef.current !== session) return;
+        if (heardAudioRef.current) return;
+        session.sendRealtimeInput({
+          text: "Respond now in spoken audio.",
+        });
+      }, 3500);
 
       try {
         const videoBlob = await captureCameraClip();
-        const uploadResult = await uploadCameraClip(checkinIdRef.current, videoBlob);
+        const uploadResult = await uploadCameraClip(
+          checkinIdRef.current,
+          videoBlob,
+        );
         const facialSymmetry = uploadResult?.facial_symmetry;
         if (facialSymmetry?.status) {
           const prefix =
@@ -560,17 +649,28 @@ export default function App() {
           setVoiceLog((prev) => [...prev, `${prefix}: ${detail}`]);
         } else {
           setFacialSymmetryStatus("Missing");
-          setFacialSymmetryReason("No facial symmetry payload was returned from backend.");
-          setVoiceLog((prev) => [...prev, "Facial symmetry result missing from backend response."]);
+          setFacialSymmetryReason(
+            "No facial symmetry payload was returned from backend.",
+          );
+          setVoiceLog((prev) => [
+            ...prev,
+            "Facial symmetry result missing from backend response.",
+          ]);
         }
       } catch (error) {
         setCameraStatus("Error");
         setFacialSymmetryStatus("Error");
-        setFacialSymmetryReason(error?.message || "Camera capture/upload failed.");
-        setVoiceLog((prev) => [...prev, error?.message || "Camera capture failed."]);
+        setFacialSymmetryReason(
+          error?.message || "Camera capture/upload failed.",
+        );
+        setVoiceLog((prev) => [
+          ...prev,
+          error?.message || "Camera capture failed.",
+        ]);
       }
 
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SpeechRecognition) {
         const recognition = new SpeechRecognition();
         recognition.continuous = true;
@@ -586,9 +686,15 @@ export default function App() {
           responsesRef.current[idx] = {
             ...response,
             transcript,
-            answer: normalizeAnswer(idx, transcript)
+            answer: normalizeAnswer(idx, transcript),
           };
           console.log("[User] Transcript", transcript);
+          const answeredCount = responsesRef.current.filter(
+            (item) => item.transcript,
+          ).length;
+          if (answeredCount >= responsesRef.current.length) {
+            maybePromptCompletion(session);
+          }
         };
         recognition.onerror = (event) => {
           console.warn("[User] Speech recognition error", event?.error);
@@ -596,7 +702,9 @@ export default function App() {
         recognition.start();
         recognitionRef.current = recognition;
       } else {
-        console.warn("[User] Speech recognition not supported in this browser.");
+        console.warn(
+          "[User] Speech recognition not supported in this browser.",
+        );
       }
 
       completionTimerRef.current = setInterval(() => {
@@ -610,18 +718,44 @@ export default function App() {
         const sessionMs = Date.now() - startedAt;
         const lastAiAt = lastAiAudioAtRef.current;
         const aiIdleMs = lastAiAt ? Date.now() - lastAiAt : 0;
-        if (aiTurnCountRef.current >= 4 && idleMs >= 4000 && aiIdleMs >= 4000 && sessionMs >= 15000) {
-          completionSentRef.current = true;
-          console.log("[Live AI] Silence detected. Posting screening payload.");
-          handleCompletion().finally(() => {
-            stopVoice();
-          });
+        const answeredCount = responsesRef.current.filter(
+          (item) => item.transcript,
+        ).length;
+
+        if (
+          answeredCount >= responsesRef.current.length &&
+          !completionPromptedRef.current &&
+          aiIdleMs >= 1500
+        ) {
+          maybePromptCompletion(session);
+          return;
+        }
+
+        if (completionPromptedRef.current) {
+          const promptedAt = completionPromptAtRef.current ?? Date.now();
+          const promptAgeMs = Date.now() - promptedAt;
+          if (aiIdleMs >= 4500 && promptAgeMs >= 4500) {
+            completionSentRef.current = true;
+            console.log(
+              "[Live AI] Final message window elapsed. Posting screening payload.",
+            );
+            handleCompletion().finally(() => {
+              stopVoice();
+            });
+          }
+          return;
+        }
+
+        if (aiTurnCountRef.current >= 4 && idleMs >= 6000 && sessionMs >= 18000) {
+          maybePromptCompletion(session);
         }
       }, 500);
 
       try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          micStreamRef.current = stream;
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        micStreamRef.current = stream;
 
         const audioContext = audioContextRef.current;
         if (!audioContext) {
@@ -652,7 +786,10 @@ export default function App() {
             userSpeakingRef.current = false;
             const startedAt = userSpeechStartRef.current ?? Date.now();
             const durationMs = Date.now() - startedAt;
-            console.log("[User] Speech ended", `${Math.round(durationMs / 100) / 10}s`);
+            console.log(
+              "[User] Speech ended",
+              `${Math.round(durationMs / 100) / 10}s`,
+            );
             userSpeechStartRef.current = null;
           }
           const resampled = resampleTo16k(input, audioContext.sampleRate);
@@ -661,8 +798,8 @@ export default function App() {
           session.sendRealtimeInput({
             audio: {
               data: base64Audio,
-              mimeType: "audio/pcm;rate=16000"
-            }
+              mimeType: "audio/pcm;rate=16000",
+            },
           });
         };
 
@@ -675,7 +812,7 @@ export default function App() {
             return;
           }
           session.sendRealtimeInput({
-            text: "Camera done. Begin the screening questions now."
+            text: "Camera done. Begin the screening questions now.",
           });
         }, 200);
       } catch (error) {
@@ -698,8 +835,12 @@ export default function App() {
       <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#f6efe5_0%,_#f4f0e8_40%,_#f8f2ed_100%)] text-ink">
         <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col justify-center gap-8 px-6 pb-16 pt-12 sm:px-8">
           <header className="text-center">
-            <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-700">Guardian Check-In</p>
-            <h1 className="mt-3 text-4xl font-semibold sm:text-5xl">Sign in to continue</h1>
+            <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-700">
+              Guardian Check-In
+            </p>
+            <h1 className="mt-3 text-4xl font-semibold sm:text-5xl">
+              Sign in to continue
+            </h1>
             <p className="mt-3 text-base text-stone-600">
               Access the check-in dashboard after authentication.
             </p>
@@ -732,9 +873,13 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#f6efe5_0%,_#f4f0e8_40%,_#f8f2ed_100%)] text-ink">
       <main className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-6 pb-16 pt-12 sm:px-8">
-
         <div className="flex items-center justify-between rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-stone-700">
-          <span>Logged in as <span className="font-semibold">{authUser?.firstName} {authUser?.lastName}</span></span>
+          <span>
+            Logged in as{" "}
+            <span className="font-semibold">
+              {authUser?.firstName} {authUser?.lastName}
+            </span>
+          </span>
           <button
             onClick={logout}
             className="rounded-full bg-stone-900 px-4 py-2 text-sm font-semibold text-white hover:bg-stone-800"
@@ -742,10 +887,14 @@ export default function App() {
             Log out
           </button>
         </div>
-        
+
         <header className="rounded-[28px] border border-amber-100 bg-amber-50/80 p-8 shadow-hero backdrop-blur">
-          <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-700">Guardian Check-In</p>
-          <h1 className="mt-3 text-4xl font-semibold sm:text-5xl">Daily health check-in</h1>
+          <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-700">
+            Guardian Check-In
+          </p>
+          <h1 className="mt-3 text-4xl font-semibold sm:text-5xl">
+            Daily health check-in
+          </h1>
           <p className="mt-3 max-w-2xl text-lg text-stone-600">
             Quick camera + voice Q&amp;A, then a simple Green/Yellow/Red result.
           </p>
@@ -768,12 +917,14 @@ export default function App() {
           </div>
         </header>
 
-        
-
         <section className="rounded-2xl border border-amber-100 bg-white p-6 shadow-card">
           <h2 className="text-xl font-semibold">Status</h2>
-          <p className="mt-2 text-stone-600">{status ? `Status: ${status}` : "Not started"}</p>
-          <div className={`mt-3 inline-flex items-center rounded-full px-4 py-2 text-sm font-semibold ${chipClass}`}>
+          <p className="mt-2 text-stone-600">
+            {status ? `Status: ${status}` : "Not started"}
+          </p>
+          <div
+            className={`mt-3 inline-flex items-center rounded-full px-4 py-2 text-sm font-semibold ${chipClass}`}
+          >
             {chipText}
           </div>
           <p className="mt-3 text-sm text-stone-600">{reason}</p>
@@ -784,11 +935,19 @@ export default function App() {
             <div className="w-full lg:w-1/2">
               <h3 className="text-lg font-semibold">Camera + Voice Check-In</h3>
               <p className="mt-2 text-sm text-stone-600">
-                {isVoiceLive ? `Voice status: ${voiceStatus}` : "Start the live voice assistant to begin."}
+                {isVoiceLive
+                  ? `Voice status: ${voiceStatus}`
+                  : "Start the live voice assistant to begin."}
               </p>
-              <p className="mt-1 text-xs text-stone-500">Camera status: {cameraStatus}</p>
-              <p className="mt-1 text-xs text-stone-500">Facial symmetry: {facialSymmetryStatus}</p>
-              <p className="mt-1 text-xs text-stone-500">{facialSymmetryReason}</p>
+              <p className="mt-1 text-xs text-stone-500">
+                Camera status: {cameraStatus}
+              </p>
+              <p className="mt-1 text-xs text-stone-500">
+                Facial symmetry: {facialSymmetryStatus}
+              </p>
+              <p className="mt-1 text-xs text-stone-500">
+                {facialSymmetryReason}
+              </p>
               <div className="mt-4 flex flex-wrap gap-3">
                 <button
                   className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
@@ -806,7 +965,9 @@ export default function App() {
                 </button>
               </div>
               <div className="mt-4 max-h-40 overflow-auto rounded-lg bg-amber-50/60 p-3 text-xs text-stone-700">
-                {voiceLog.length === 0 ? "No messages yet." : voiceLog.join("\n\n")}
+                {voiceLog.length === 0
+                  ? "No messages yet."
+                  : voiceLog.join("\n\n")}
               </div>
             </div>
             <div className="w-full lg:w-1/2">
@@ -820,7 +981,8 @@ export default function App() {
                 />
               </div>
               <p className="mt-2 text-xs text-stone-500">
-                The camera preview appears while the 10s recording is in progress.
+                The camera preview appears while the 10s recording is in
+                progress.
               </p>
             </div>
           </div>
