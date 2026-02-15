@@ -1,5 +1,6 @@
-import AuthPanel from "../Auth.jsx";
-import { API_BASE } from "../lib/api.js";
+import BrandHeader from "./login/BrandHeader.jsx";
+import AuthCard from "./login/AuthCard.jsx";
+import TrustBadges from "./login/TrustBadges.jsx";
 
 export default function LoginScreen({ auth }) {
   const {
@@ -22,40 +23,42 @@ export default function LoginScreen({ auth }) {
     authError,
   } = auth;
 
+  const isLoading = authStatus === "loading";
+  const isAuthed = Boolean(authToken && authUser?.email);
+  const ctaLabel = isLoading
+    ? "Working..."
+    : authMode === "register"
+      ? "Create account"
+      : "Sign in";
+
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#f6efe5_0%,_#f4f0e8_40%,_#f8f2ed_100%)] text-ink">
-      <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col justify-center gap-8 px-6 pb-16 pt-12 sm:px-8">
-        <header className="text-center">
-          <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-700">
-            Guardian Check-In
-          </p>
-          <h1 className="mt-3 text-4xl font-semibold sm:text-5xl">
-            Sign in to continue
-          </h1>
-          <p className="mt-3 text-base text-stone-600">
-            Access the check-in dashboard after authentication.
-          </p>
-        </header>
-        <AuthPanel
-          authStatus={authStatus}
-          authToken={authToken}
-          authUser={authUser}
-          apiBase={API_BASE}
-          refreshMe={refreshMe}
-          logout={logout}
-          submitAuth={submitAuth}
-          authMode={authMode}
-          setAuthMode={setAuthMode}
-          authFirstName={authFirstName}
-          setAuthFirstName={setAuthFirstName}
-          authLastName={authLastName}
-          setAuthLastName={setAuthLastName}
-          authEmail={authEmail}
-          setAuthEmail={setAuthEmail}
-          authPassword={authPassword}
-          setAuthPassword={setAuthPassword}
-          authError={authError}
-        />
+    <div className="h-[100svh] overflow-hidden bg-[#f3f0ea] px-3 py-2 text-[#1d1b19] sm:px-4 sm:py-3">
+      <main className="mx-auto grid h-full w-full max-w-5xl place-items-center">
+        <section className="flex w-full max-w-[560px] flex-col items-center gap-3 sm:gap-3.5">
+          <BrandHeader />
+          <AuthCard
+            isAuthed={isAuthed}
+            submitAuth={submitAuth}
+            authMode={authMode}
+            setAuthMode={setAuthMode}
+            authFirstName={authFirstName}
+            setAuthFirstName={setAuthFirstName}
+            authLastName={authLastName}
+            setAuthLastName={setAuthLastName}
+            authEmail={authEmail}
+            setAuthEmail={setAuthEmail}
+            authPassword={authPassword}
+            setAuthPassword={setAuthPassword}
+            authError={authError}
+            isLoading={isLoading}
+            ctaLabel={ctaLabel}
+            authUser={authUser}
+            authToken={authToken}
+            refreshMe={refreshMe}
+            logout={logout}
+          />
+          {!isAuthed ? <TrustBadges /> : null}
+        </section>
       </main>
     </div>
   );
