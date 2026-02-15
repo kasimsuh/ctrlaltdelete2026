@@ -22,7 +22,12 @@ from app.auth import (
     ensure_user_indexes,
     require_current_user,
 )
-from app.db import mongo_check
+from app.db import (
+    mongo_check,
+    get_dashboard_analytics,
+    get_latest_checkins,
+    get_senior_users,
+)
 
 # Load env vars from repo root `.env` (and optionally `backend/.env`) for local dev.
 # Uvicorn doesn't auto-load dotenv files.
@@ -280,6 +285,51 @@ def me(user: Optional[dict] = Depends(require_current_user)) -> MeResponse:
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return MeResponse(email=user["email"], firstName=user.get("firstName", ""), lastName=user.get("lastName", ""), role=user.get("role", "senior"))
+
+
+def _require_doctor(user: Optional[dict]) -> dict:
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if user.get("role") != "doctor":
+        raise HTTPException(status_code=403, detail="Doctor role required")
+    return user
+
+
+def _serialize_dt(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+@app.get("/dashboard/analytics")
+def dashboard_analytics(user: Optional[dict] = Depends(require_current_user)):
+    _require_doctor(user)
+    return get_dashboard_analytics(days=7)
+
+
+@app.get("/dashboard/seniors")
+def dashboard_seniors(user: Optional[dict] = Depends(require_current_user)):
+    _require_doctor(user)
+    seniors = get_senior_users(limit=50)
+    user_ids = [senior["_id"] for senior in seniors]
+    latest_checkins = get_latest_checkins(user_ids)
+
+    response_items = []
+    for senior in seniors:
+        last_checkin = latest_checkins.get(senior["_id"])
+        response_items.append(
+            {
+                "id": str(senior["_id"]),
+                "firstName": senior.get("firstName", ""),
+                "lastName": senior.get("lastName", ""),
+                "email": senior.get("email", ""),
+                "lastCheckinAt": _serialize_dt(last_checkin.get("completed_at")) if last_checkin else None,
+                "triageStatus": (last_checkin.get("triage_status") if last_checkin else None),
+                "checkinId": (last_checkin.get("checkin_id") if last_checkin else None),
+            }
+        )
+
+    return {"seniors": response_items}
 
 
 @app.post("/auth/ephemeral", response_model=EphemeralTokenResponse)

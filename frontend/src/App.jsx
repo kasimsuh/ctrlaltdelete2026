@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { GoogleGenAI, Modality } from "@google/genai";
 
-import { API_BASE } from "./lib/api.js";
+import { API_BASE, apiFetch } from "./lib/api.js";
 import * as Auth from "./lib/auth.js";
 import AuthPanel from "./Auth.jsx";
 
@@ -130,6 +130,18 @@ export default function App() {
   const [voiceLog, setVoiceLog] = useState([]);
   const [isVoiceLive, setIsVoiceLive] = useState(false);
   const [cameraStatus, setCameraStatus] = useState("Idle");
+  const [doctorSeniors, setDoctorSeniors] = useState([]);
+  const [doctorStats, setDoctorStats] = useState({
+    total_seniors: 0,
+    total_checkins: 0,
+    green: 0,
+    yellow: 0,
+    red: 0,
+    alerts: 0,
+    window_days: 7
+  });
+  const [doctorLoading, setDoctorLoading] = useState(false);
+  const [doctorError, setDoctorError] = useState(null);
 
   const sessionRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -649,6 +661,46 @@ export default function App() {
 
   const chipClass = statusColor[status] || statusColor.neutral;
   const chipText = status || "—";
+  const isDoctor = authUser?.role === "doctor";
+  const formattedSeniors = useMemo(() => {
+    return doctorSeniors.map((senior) => {
+      const lastCheckinAt = senior.lastCheckinAt
+        ? new Date(senior.lastCheckinAt).toLocaleString()
+        : "No check-in yet";
+      const name = `${senior.firstName || ""} ${senior.lastName || ""}`.trim() || "Unknown";
+      const triage = senior.triageStatus
+        ? `${senior.triageStatus}`.replace(/^[a-z]/, (char) => char.toUpperCase())
+        : "—";
+      return {
+        ...senior,
+        displayName: name,
+        lastCheckinAt,
+        triage
+      };
+    });
+  }, [doctorSeniors]);
+
+  useEffect(() => {
+    const loadDoctorDashboard = async () => {
+      if (!isDoctor || !authToken) return;
+      setDoctorLoading(true);
+      setDoctorError(null);
+      try {
+        const [analytics, seniors] = await Promise.all([
+          apiFetch("/dashboard/analytics", { token: authToken }),
+          apiFetch("/dashboard/seniors", { token: authToken })
+        ]);
+        setDoctorStats(analytics);
+        setDoctorSeniors(seniors?.seniors || []);
+      } catch (err) {
+        setDoctorError(err?.message || "Failed to load dashboard data");
+      } finally {
+        setDoctorLoading(false);
+      }
+    };
+
+    loadDoctorDashboard();
+  }, [authToken, isDoctor]);
 
   if (!isAuthed) {
     return (
@@ -681,6 +733,105 @@ export default function App() {
             setAuthPassword={setAuthPassword}
             authError={authError}
           />
+        </main>
+      </div>
+    );
+  }
+
+  if (isDoctor) {
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#f6efe5_0%,_#f4f0e8_40%,_#f8f2ed_100%)] text-ink">
+        <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 pb-16 pt-12 sm:px-8">
+          <div className="flex items-center justify-between rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-stone-700">
+            <span>
+              Doctor dashboard · <span className="font-semibold">{authUser?.firstName} {authUser?.lastName}</span>
+            </span>
+            <button
+              onClick={logout}
+              className="rounded-full bg-stone-900 px-4 py-2 text-sm font-semibold text-white hover:bg-stone-800"
+            >
+              Log out
+            </button>
+          </div>
+
+          <header className="rounded-[28px] border border-amber-100 bg-amber-50/80 p-8 shadow-hero backdrop-blur">
+            <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-700">Guardian Analytics</p>
+            <h1 className="mt-3 text-4xl font-semibold sm:text-5xl">Clinical overview</h1>
+            <p className="mt-3 max-w-2xl text-lg text-stone-600">
+              Live pulse on seniors, triage distribution, and follow-up priorities.
+            </p>
+          </header>
+
+          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-amber-100 bg-white p-6 shadow-card">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-stone-500">Total seniors</p>
+              <p className="mt-3 text-3xl font-semibold text-stone-900">{doctorStats.total_seniors}</p>
+              <p className="mt-2 text-sm text-stone-600">Active in the last 7 days</p>
+            </div>
+            <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-6 shadow-card">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">Green status</p>
+              <p className="mt-3 text-3xl font-semibold text-emerald-800">{doctorStats.green}</p>
+              <p className="mt-2 text-sm text-emerald-700">Stable check-ins</p>
+            </div>
+            <div className="rounded-2xl border border-amber-100 bg-amber-50/60 p-6 shadow-card">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-amber-700">Yellow alerts</p>
+              <p className="mt-3 text-3xl font-semibold text-amber-800">{doctorStats.yellow}</p>
+              <p className="mt-2 text-sm text-amber-700">Monitor within 24 hours</p>
+            </div>
+            <div className="rounded-2xl border border-rose-100 bg-rose-50/60 p-6 shadow-card">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-rose-700">Red alerts</p>
+              <p className="mt-3 text-3xl font-semibold text-rose-800">{doctorStats.red}</p>
+              <p className="mt-2 text-sm text-rose-700">Immediate follow-up</p>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-amber-100 bg-white p-6 shadow-card">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 className="text-xl font-semibold">Senior overview</h2>
+                <p className="text-sm text-stone-600">Latest check-ins and context for follow-up.</p>
+              </div>
+              <div className="rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-stone-700">
+                {doctorStats.alerts} seniors need attention
+              </div>
+            </div>
+            <div className="mt-6 grid gap-4">
+              {doctorLoading ? (
+                <div className="rounded-2xl border border-stone-200 bg-stone-50/60 p-5 text-sm text-stone-600">
+                  Loading dashboard data...
+                </div>
+              ) : doctorError ? (
+                <div className="rounded-2xl border border-rose-100 bg-rose-50/60 p-5 text-sm text-rose-700">
+                  {doctorError}
+                </div>
+              ) : formattedSeniors.length === 0 ? (
+                <div className="rounded-2xl border border-stone-200 bg-stone-50/60 p-5 text-sm text-stone-600">
+                  No seniors found yet.
+                </div>
+              ) : null}
+              {formattedSeniors.map((senior) => (
+                <div
+                  key={senior.id}
+                  className="flex flex-col gap-4 rounded-2xl border border-stone-200 bg-stone-50/60 p-5 md:flex-row md:items-center md:justify-between"
+                >
+                  <div>
+                    <p className="text-lg font-semibold text-stone-900">{senior.displayName}</p>
+                    <p className="text-sm text-stone-600">Last check-in {senior.lastCheckinAt}</p>
+                    <p className="mt-2 text-sm text-stone-600">{senior.email}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`rounded-full px-4 py-2 text-xs font-semibold ${
+                        statusColor[senior.triage] || statusColor.neutral
+                      }`}
+                    >
+                      {senior.triage}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         </main>
       </div>
     );
