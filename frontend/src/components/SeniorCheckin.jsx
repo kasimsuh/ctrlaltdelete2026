@@ -1,7 +1,7 @@
 import useCheckin from "../hooks/useCheckin.js";
 import { statusColor } from "../lib/screening.js";
 
-export default function SeniorCheckin({ authUser, logout }) {
+export default function SeniorCheckin({ authUser, authToken, logout }) {
   const {
     status,
     reason,
@@ -17,7 +17,7 @@ export default function SeniorCheckin({ authUser, logout }) {
     startCheckin,
     startVoice,
     stopVoice,
-  } = useCheckin();
+  } = useCheckin(authUser, authToken);
 
   const chipClass = statusColor[status] || statusColor.neutral;
   const chipText = status || "—";

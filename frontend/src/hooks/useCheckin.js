@@ -16,11 +16,13 @@ import {
   cameraDurationMs,
   normalizeAnswer,
   INITIAL_RESPONSES,
+  parseSymptomTranscript,
+  buildTranscript,
 } from "../lib/screening.js";
 
 const apiBase = API_BASE;
 
-export default function useCheckin() {
+export default function useCheckin(authUser, authToken) {
   const [status, setStatus] = useState(null);
   const [reason, setReason] = useState("Run a check-in to see triage output.");
   const [isDemoMode, setIsDemoMode] = useState(true);
@@ -70,8 +72,11 @@ export default function useCheckin() {
     try {
       const response = await fetch(`${apiBase}/checkins/start`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ demo_mode: isDemoMode }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({}),
       });
 
       if (!response.ok) {
@@ -83,7 +88,10 @@ export default function useCheckin() {
         `${apiBase}/checkins/${data.checkin_id}/complete`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+          },
           body: JSON.stringify({
             answers: {
               dizziness: false,
@@ -171,18 +179,48 @@ export default function useCheckin() {
   };
 
   const handleCompletion = async () => {
+    const responses = responsesRef.current;
     const screeningData = {
       session_id: `screening_${Date.now()}`,
       timestamp: new Date().toISOString(),
-      senior_id: "demo-senior",
       checkin_id: checkinIdRef.current,
-      responses: responsesRef.current,
+      responses,
     };
 
     await fetch(`${apiBase}/screenings`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
       body: JSON.stringify(screeningData),
+    });
+
+    if (!checkinIdRef.current) return;
+
+    const symptomResponse = responses[1] || {};
+    const symptomTranscript = symptomResponse.transcript || "";
+    const parsedSymptoms = parseSymptomTranscript(symptomTranscript);
+    const symptomAnswer = symptomResponse.answer;
+
+    const answers = {
+      dizziness:
+        parsedSymptoms.dizziness ||
+        (symptomAnswer === true && !parsedSymptoms.chest_pain && !parsedSymptoms.trouble_breathing),
+      chest_pain: parsedSymptoms.chest_pain,
+      trouble_breathing: parsedSymptoms.trouble_breathing,
+      medication_taken: responses[2]?.answer ?? null,
+    };
+
+    const transcript = buildTranscript(responses);
+
+    await fetch(`${apiBase}/checkins/${checkinIdRef.current}/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+      body: JSON.stringify({ answers, transcript }),
     });
   };
 
@@ -251,6 +289,7 @@ export default function useCheckin() {
     );
     const response = await fetch(`${apiBase}/checkins/${checkinId}/upload`, {
       method: "POST",
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
       body: formData,
     });
     if (!response.ok) {
@@ -265,7 +304,9 @@ export default function useCheckin() {
     }
     const data = await response.json();
     if (!data?.facial_symmetry) {
-      const detailResponse = await fetch(`${apiBase}/checkins/${checkinId}`);
+      const detailResponse = await fetch(`${apiBase}/checkins/${checkinId}`, {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      });
       if (detailResponse.ok) {
         const detailData = await detailResponse.json();
         data.facial_symmetry = detailData?.facial_symmetry ?? null;
@@ -305,11 +346,11 @@ export default function useCheckin() {
     try {
       const checkinResponse = await fetch(`${apiBase}/checkins/start`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          demo_mode: isDemoMode,
-          senior_id: "demo-senior",
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({}),
       });
       if (!checkinResponse.ok) {
         throw new Error("Failed to start check-in");
