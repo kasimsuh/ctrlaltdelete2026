@@ -1,0 +1,155 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Space+Mono:wght@400;700&display=swap");
+
+:root {
+  color-scheme: light;
+  font-family: "Space Grotesk", "Trebuchet MS", sans-serif;
+  background: radial-gradient(circle at top left, #f6efe5 0%, #f4f0e8 40%, #f8f2ed 100%);
+  color: #1f1b16;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #fef6e6 0%, #f4f0ea 50%, #f0ede8 100%);
+}
+
+.page {
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: 48px 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.hero {
+  background: #fffaf2;
+  border: 1px solid #e7dccb;
+  border-radius: 28px;
+  padding: 36px;
+  box-shadow: 0 20px 40px rgba(31, 27, 22, 0.12);
+}
+
+.eyebrow {
+  font-family: "Space Mono", "Courier New", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 12px;
+  margin: 0 0 12px;
+  color: #8a6f56;
+}
+
+.hero h1 {
+  font-size: clamp(2.4rem, 3vw, 3.4rem);
+  margin: 0 0 8px;
+}
+
+.subhead {
+  font-size: 1.1rem;
+  margin: 0 0 24px;
+  color: #5f5348;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+}
+
+.primary {
+  font-size: 1.05rem;
+  padding: 14px 24px;
+  border-radius: 999px;
+  border: none;
+  background: #de5b2f;
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 12px 20px rgba(222, 91, 47, 0.25);
+}
+
+.primary:hover {
+  transform: translateY(-2px);
+}
+
+.secondary {
+  padding: 10px 16px;
+  border-radius: 12px;
+  border: 1px solid #d6c8b7;
+  background: #fff;
+  color: #4b4036;
+  cursor: pointer;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.95rem;
+  color: #5a4e43;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #eadfce;
+  border-radius: 20px;
+  padding: 24px;
+  box-shadow: 0 12px 24px rgba(31, 27, 22, 0.08);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+}
+
+.muted {
+  color: #6a5f56;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-top: 12px;
+}
+
+.chip.neutral {
+  background: #efe7db;
+  color: #6a5f56;
+}
+
+.chip.green {
+  background: #d5efe0;
+  color: #1f6a44;
+}
+
+.chip.yellow {
+  background: #fff3c7;
+  color: #8a6f00;
+}
+
+.chip.red,
+.chip.error {
+  background: #fde2de;
+  color: #a8322a;
+}
+
+@media (max-width: 720px) {
+  .page {
+    padding: 32px 16px 48px;
+  }
+
+  .hero {
+    padding: 28px;
+  }
+}
