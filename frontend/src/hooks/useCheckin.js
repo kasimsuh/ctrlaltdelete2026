@@ -21,7 +21,7 @@ import {
 } from "../lib/screening.js";
 
 const apiBase = API_BASE;
-const FACE_CAPTURE_BUFFER_MS = 5000;
+const FACE_CAPTURE_BUFFER_MS = 6500;
 
 export default function useCheckin(authUser, authToken) {
   const [status, setStatus] = useState(null);
