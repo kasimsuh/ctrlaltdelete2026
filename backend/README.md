@@ -47,3 +47,9 @@ Environment variables:
 - `JWT_ALG` (default `HS256`)
 - `JWT_EXPIRES_MIN` (default `60`)
 - `REQUIRE_AUTH` (default `false`; when `true`, missing tokens on protected endpoints should be rejected once you add enforcement to routes)
+
+## ElevenLabs STT
+
+Set `ELEVENLABS_API_KEY` and call:
+
+- `POST /stt/elevenlabs` (multipart form): `file=@speech.wav`

@@ -21,10 +21,10 @@ npm run dev
 
 ```bash
 cd backend
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
 3. MongoDB (optional, with auth)

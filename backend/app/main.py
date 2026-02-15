@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+import httpx
+import json
 
 from app.auth import (
     authenticate_user,
@@ -232,6 +234,18 @@ class EphemeralTokenResponse(BaseModel):
     expires_at: datetime
 
 
+class SpeechToTextResponse(BaseModel):
+    text: str
+
+
+class SpeechToTextLogResponse(BaseModel):
+    text: str
+    path: str
+
+
+class ElevenLabsSignedUrlResponse(BaseModel):
+    signed_url: str
+
 CHECKINS: Dict[str, Dict[str, object]] = {}
 CHECKIN_UPLOADS: Dict[str, List[str]] = {}
 BASELINES: Dict[str, List[BaselineMetric]] = {}
@@ -239,6 +253,19 @@ ALERTS: Dict[str, List[AlertResponse]] = {}
 WEEKLY_SUMMARIES: Dict[str, List[WeeklySummary]] = {}
 SCREENINGS: Dict[str, ScreeningSession] = {}
 
+class AgentLogEvent(BaseModel):
+    checkin_id: str
+    role: str  # "agent" | "user" | "system"
+    text: str
+    ts: datetime
+
+LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+@app.post("/logs/agent", include_in_schema=False)
+def log_agent_event(payload: AgentLogEvent):
+    # Deprecated: kept only to avoid breaking older clients.
+    return {"ok": True, "deprecated": True}
 
 @app.get("/health", response_model=HealthStatus)
 def health_check() -> HealthStatus:
@@ -298,6 +325,12 @@ def create_ephemeral_token() -> EphemeralTokenResponse:
     )
 
     now = datetime.now(timezone.utc)
+    if not hasattr(client, "auth_tokens"):
+        raise HTTPException(
+            status_code=500,
+            detail="google-genai is too old for auth tokens; upgrade backend deps (pip install -r requirements.txt).",
+        )
+
     token = client.auth_tokens.create(
         config={
             "uses": 1,
@@ -307,6 +340,116 @@ def create_ephemeral_token() -> EphemeralTokenResponse:
     )
 
     return EphemeralTokenResponse(token=token.name, expires_at=now + timedelta(minutes=30))
+
+
+@app.post("/stt/elevenlabs", response_model=SpeechToTextResponse)
+def elevenlabs_speech_to_text(
+    file: UploadFile = File(...),
+    stt_model_id: str = Form(default="scribe_v2", alias="model_id"),
+    language_code: Optional[str] = Form(default=None),
+) -> SpeechToTextResponse:
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY is not set")
+
+    data = {"model_id": stt_model_id}
+    if language_code:
+        data["language_code"] = language_code
+
+    try:
+        resp = httpx.post(
+            "https://api.elevenlabs.io/v1/speech-to-text",
+            headers={"xi-api-key": api_key},
+            data=data,
+            files={"file": (file.filename or "audio.wav", file.file, file.content_type or "application/octet-stream")},
+            timeout=60.0,
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"ElevenLabs request failed: {e.__class__.__name__}")
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"ElevenLabs STT error {resp.status_code}: {resp.text[:500]}")
+
+    payload = resp.json()
+    text = payload.get("text") or payload.get("transcript") or ""
+    return SpeechToTextResponse(text=text)
+
+
+@app.post("/stt/elevenlabs/log", response_model=SpeechToTextLogResponse)
+def elevenlabs_speech_to_text_log(
+    file: UploadFile = File(...),
+    session_id: str = Form(default="default"),
+    role: str = Form(default="user"),
+    user_email: Optional[str] = Form(default=None),
+    checkin_id: Optional[str] = Form(default=None),
+    stt_model_id: str = Form(default="scribe_v2", alias="model_id"),
+    language_code: Optional[str] = Form(default=None),
+) -> SpeechToTextLogResponse:
+    """
+    Transcribe audio with ElevenLabs STT and append to a JSON file on disk.
+    Intended to be called repeatedly (one utterance per request) while the agent session is running.
+    """
+    result = elevenlabs_speech_to_text(file=file, stt_model_id=stt_model_id, language_code=language_code)
+
+    logs_dir = Path(__file__).resolve().parents[1] / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    safe_session = "".join(ch for ch in session_id if ch.isalnum() or ch in ("-", "_"))[:80] or "default"
+    path = logs_dir / f"stt_{safe_session}.json"
+
+    record = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "session_id": session_id,
+        "checkin_id": checkin_id,
+        "role": role,
+        "user_email": user_email,
+        "text": result.text,
+        "provider": "elevenlabs",
+        "model_id": stt_model_id,
+    }
+
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        if not isinstance(existing, list):
+            existing = []
+    except Exception:
+        existing = []
+    existing.append(record)
+    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    return SpeechToTextLogResponse(text=result.text, path=str(path))
+
+
+@app.get("/elevenlabs/signed-url", response_model=ElevenLabsSignedUrlResponse)
+def elevenlabs_get_signed_url(agent_id: Optional[str] = None) -> ElevenLabsSignedUrlResponse:
+    """
+    Returns a short-lived signed URL for starting an ElevenLabs Conversational AI session
+    from the browser without exposing the API key.
+    """
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY is not set")
+
+    agent = agent_id or os.getenv("ELEVENLABS_AGENT_ID")
+    if not agent:
+        raise HTTPException(status_code=500, detail="ELEVENLABS_AGENT_ID is not set (or pass ?agent_id=...)")
+
+    try:
+        resp = httpx.get(
+            "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url",
+            params={"agent_id": agent},
+            headers={"xi-api-key": api_key},
+            timeout=30.0,
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"ElevenLabs request failed: {e.__class__.__name__}")
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"ElevenLabs signed-url error {resp.status_code}: {resp.text[:500]}")
+
+    signed_url = (resp.json() or {}).get("signed_url")
+    if not signed_url:
+        raise HTTPException(status_code=502, detail="ElevenLabs signed-url response missing 'signed_url'")
+    return ElevenLabsSignedUrlResponse(signed_url=signed_url)
 
 
 @app.post("/checkins/start", response_model=CheckinStartResponse)

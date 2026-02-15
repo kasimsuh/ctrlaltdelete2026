@@ -1,21 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { GoogleGenAI, Modality } from "@google/genai";
+import { Conversation } from "@elevenlabs/client";
 
 import { API_BASE } from "./lib/api.js";
 import * as Auth from "./lib/auth.js";
 import AuthPanel from "./Auth.jsx";
 
 const apiBase = API_BASE;
-const modelName = "gemini-2.5-flash-native-audio-preview-12-2025";
-const systemInstruction = `ROLE: You are a professional Medical Screening Assistant.
-OBJECTIVE: Conduct a brief well-being check by asking specific questions.
-RULES:
-1. First ask the user to look at their camera for 10 seconds and wait for a "camera done" signal.
-2. Then ask: "How are you feeling today?"
-3. Follow up with: "Are you experiencing any dizziness, chest pain, or trouble breathing?"
-4. Finally ask: "Did you take your morning medications?"
-5. STRICT: Only ask these questions. If the user tries to change the subject, politely redirect them back to the screening.
-6. TERMINATION: Once all questions are answered, say exactly: "Thank you for your responses. The screening is now complete. Goodbye."`;
 
 const cameraDurationMs = 10000;
 
@@ -30,35 +20,6 @@ const statusColor = {
 const completionPhrase = "Thank you for your responses. The screening is now complete. Goodbye.";
 
 const TOKEN_STORAGE_KEY = "guardian_checkin.jwt";
-
-const createAudioBuffer = (audioContext, pcm16, sampleRate) => {
-  const floatData = new Float32Array(pcm16.length);
-  for (let i = 0; i < pcm16.length; i += 1) {
-    floatData[i] = Math.max(-1, Math.min(1, pcm16[i] / 32768));
-  }
-  const buffer = audioContext.createBuffer(1, floatData.length, sampleRate);
-  buffer.copyToChannel(floatData, 0);
-  return buffer;
-};
-
-const decodeBase64ToInt16 = (base64) => {
-  const binary = atob(base64);
-  const length = binary.length;
-  const bytes = new Uint8Array(length);
-  for (let i = 0; i < length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return new Int16Array(bytes.buffer);
-};
-
-const encodeToBase64 = (int16) => {
-  const bytes = new Uint8Array(int16.buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-};
 
 const resampleTo16k = (input, inputRate) => {
   if (inputRate === 16000) {
@@ -84,6 +45,52 @@ const floatToInt16 = (floatData) => {
     output[i] = sample < 0 ? sample * 32768 : sample * 32767;
   }
   return output;
+};
+
+const concatInt16 = (chunks) => {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Int16Array(total);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return out;
+};
+
+const pcm16ToWavBlob = (pcm16, sampleRate = 16000) => {
+  const buffer = new ArrayBuffer(44 + pcm16.length * 2);
+  const view = new DataView(buffer);
+
+  const writeString = (offset, str) => {
+    for (let i = 0; i < str.length; i += 1) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + pcm16.length * 2, true);
+  writeString(8, "WAVE");
+
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+
+  writeString(36, "data");
+  view.setUint32(40, pcm16.length * 2, true);
+
+  let offset = 44;
+  for (let i = 0; i < pcm16.length; i += 1) {
+    view.setInt16(offset, pcm16[i], true);
+    offset += 2;
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
 };
 
 const normalizeAnswer = (questionIndex, text) => {
@@ -132,33 +139,34 @@ export default function App() {
   const [cameraStatus, setCameraStatus] = useState("Idle");
 
   const sessionRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const processorRef = useRef(null);
-  const micStreamRef = useRef(null);
   const cameraStreamRef = useRef(null);
   const cameraVideoRef = useRef(null);
   const checkinIdRef = useRef(null);
   const isSessionOpenRef = useRef(false);
-  const audioQueueRef = useRef([]);
-  const isPlayingRef = useRef(false);
   const lastAudioAtRef = useRef(null);
   const heardAudioRef = useRef(false);
   const completionSentRef = useRef(false);
   const completionTimerRef = useRef(null);
   const voiceStartAtRef = useRef(null);
   const lastUserAudioAtRef = useRef(null);
-  const lastAiAudioAtRef = useRef(null);
-  const lastAiBurstAtRef = useRef(null);
-  const aiTurnCountRef = useRef(0);
-  const userSpeakingRef = useRef(false);
-  const userSpeechStartRef = useRef(null);
   const currentQuestionIndexRef = useRef(0);
   const responsesRef = useRef([
     { q: "How are you feeling today?", answer: null, transcript: null },
     { q: "Are you experiencing any dizziness, chest pain, or trouble breathing?", answer: null, transcript: null },
     { q: "Did you take your morning medications?", answer: null, transcript: null }
   ]);
-  const recognitionRef = useRef(null);
+  const conversationRef = useRef(null);
+  const sttPathRef = useRef(null);
+
+  // Local mic capture for STT logging while the agent is running.
+  const sttStreamRef = useRef(null);
+  const sttAudioContextRef = useRef(null);
+  const sttProcessorRef = useRef(null);
+  const sttCollectingRef = useRef(false);
+  const sttSilenceFramesRef = useRef(0);
+  const sttChunksRef = useRef([]);
+  const sttQueueRef = useRef([]);
+  const sttInFlightRef = useRef(false);
 
   const persistToken = (token) => {
     setAuthToken(token);
@@ -282,26 +290,26 @@ export default function App() {
       completionTimerRef.current = null;
     }
     lastAudioAtRef.current = null;
-    lastAiAudioAtRef.current = null;
-    lastAiBurstAtRef.current = null;
     heardAudioRef.current = false;
     completionSentRef.current = false;
-    aiTurnCountRef.current = 0;
-    userSpeakingRef.current = false;
-    userSpeechStartRef.current = null;
     currentQuestionIndexRef.current = 0;
     responsesRef.current = responsesRef.current.map((item) => ({ ...item, answer: null, transcript: null }));
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
+    sttCollectingRef.current = false;
+    sttSilenceFramesRef.current = 0;
+    sttChunksRef.current = [];
+    sttQueueRef.current = [];
+    sttInFlightRef.current = false;
+    if (sttProcessorRef.current) {
+      sttProcessorRef.current.disconnect();
+      sttProcessorRef.current = null;
     }
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
+    if (sttStreamRef.current) {
+      sttStreamRef.current.getTracks().forEach((track) => track.stop());
+      sttStreamRef.current = null;
     }
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((track) => track.stop());
-      micStreamRef.current = null;
+    if (sttAudioContextRef.current) {
+      await sttAudioContextRef.current.close().catch(() => {});
+      sttAudioContextRef.current = null;
     }
     if (cameraStreamRef.current) {
       cameraStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -310,15 +318,19 @@ export default function App() {
     if (cameraVideoRef.current) {
       cameraVideoRef.current.srcObject = null;
     }
-    if (audioContextRef.current) {
-      await audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
   };
 
   const stopVoice = async () => {
     setVoiceStatus("Stopping...");
     isSessionOpenRef.current = false;
+    if (conversationRef.current) {
+      try {
+        await conversationRef.current.endSession();
+      } catch {
+        // ignore
+      }
+      conversationRef.current = null;
+    }
     await cleanupAudio();
     if (sessionRef.current) {
       sessionRef.current.close();
@@ -398,30 +410,13 @@ export default function App() {
     setCameraStatus("Uploaded");
   };
 
-  const playQueuedAudio = () => {
-    if (isPlayingRef.current) return;
-    const audioContext = audioContextRef.current;
-    if (!audioContext || audioQueueRef.current.length === 0) return;
-
-    const { pcm, sampleRate } = audioQueueRef.current.shift();
-    isPlayingRef.current = true;
-    const buffer = createAudioBuffer(audioContext, pcm, sampleRate);
-    const source = audioContext.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioContext.destination);
-    source.onended = () => {
-      isPlayingRef.current = false;
-      playQueuedAudio();
-    };
-    source.start();
-  };
-
   const startVoice = async () => {
     if (isVoiceLive) return;
 
     setIsVoiceLive(true);
     setVoiceStatus("Connecting...");
     setVoiceLog([]);
+    sttPathRef.current = null;
 
     try {
       const checkinResponse = await fetch(`${apiBase}/checkins/start`, {
@@ -429,96 +424,155 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ demo_mode: isDemoMode, senior_id: "demo-senior" })
       });
-      if (!checkinResponse.ok) {
-        throw new Error("Failed to start check-in");
-      }
+      if (!checkinResponse.ok) throw new Error("Failed to start check-in");
       const checkinData = await checkinResponse.json();
       checkinIdRef.current = checkinData.checkin_id;
 
-      const tokenResponse = await fetch(`${apiBase}/auth/ephemeral`, { method: "POST" });
-      if (!tokenResponse.ok) {
-        throw new Error("Failed to fetch ephemeral token");
+      // Fetch a signed URL from our backend (keeps ELEVENLABS_API_KEY off the client).
+      const signedUrlResp = await fetch(`${apiBase}/elevenlabs/signed-url`);
+      const signedData = await signedUrlResp.json().catch(() => null);
+      if (!signedUrlResp.ok) {
+        const message = signedData?.detail || signedData?.message || "Failed to fetch ElevenLabs signed URL";
+        throw new Error(message);
       }
-      const tokenData = await tokenResponse.json();
 
-      const ai = new GoogleGenAI({
-        apiKey: tokenData.token,
-        httpOptions: { apiVersion: "v1alpha" }
-      });
-      const session = await ai.live.connect({
-        model: modelName,
-        httpOptions: { apiVersion: "v1alpha" },
-        config: {
-          responseModalities: [Modality.AUDIO],
-          systemInstruction
+      setVoiceStatus("Connecting to ElevenLabs...");
+      voiceStartAtRef.current = Date.now();
+
+      const conversation = await Conversation.startSession({
+        signedUrl: signedData.signed_url,
+        connectionType: "websocket",
+        onConnect: () => {
+          isSessionOpenRef.current = true;
+          setVoiceStatus("Listening...");
         },
-        callbacks: {
-          onmessage: (message) => {
-            if (message.serverContent?.modelTurn?.parts) {
-              message.serverContent.modelTurn.parts.forEach((part) => {
-                if (part.inlineData?.data) {
-                  const audioContext = audioContextRef.current;
-                  if (!audioContext) return;
-                  const pcm = decodeBase64ToInt16(part.inlineData.data);
-                  lastAudioAtRef.current = Date.now();
-                  lastAiAudioAtRef.current = Date.now();
-                  if (!lastAiBurstAtRef.current || Date.now() - lastAiBurstAtRef.current > 1000) {
-                    aiTurnCountRef.current += 1;
-                    const questionIndex = Math.max(0, Math.min(aiTurnCountRef.current - 2, responsesRef.current.length - 1));
-                    currentQuestionIndexRef.current = questionIndex;
-                    console.log("[Live AI] Turn", aiTurnCountRef.current, "Question index", questionIndex);
-                  }
-                  lastAiBurstAtRef.current = Date.now();
-                  heardAudioRef.current = true;
-                  audioQueueRef.current.push({ pcm, sampleRate: 24000 });
-                  playQueuedAudio();
-                }
-
-                if (part.text) {
-                  console.log("[Live AI]", part.text);
-                  setVoiceLog((prev) => [...prev, part.text]);
-                  if (part.text.includes(completionPhrase)) {
-                    console.log("[Live AI] Completion phrase detected. Posting screening payload.");
-                    handleCompletion().finally(() => {
-                      stopVoice();
-                    });
-                  }
-                }
-              });
-            }
-          },
-          onerror: (e) => {
-            setVoiceStatus("Error");
-            setVoiceLog((prev) => [...prev, `Error: ${e.message}`]);
-          },
-          onclose: (event) => {
-            isSessionOpenRef.current = false;
-            cleanupAudio();
-            setVoiceStatus("Closed");
-            if (event?.reason) {
-              setVoiceLog((prev) => [...prev, `Closed: ${event.reason}`]);
-            }
+        onDisconnect: () => {
+          isSessionOpenRef.current = false;
+          setVoiceStatus("Closed");
+        },
+        onError: (error) => {
+          setVoiceStatus("Error");
+          setVoiceLog((prev) => [...prev, `[ElevenLabs error] ${error?.message || String(error)}`]);
+        },
+        onMessage: (message) => {
+          const text = (typeof message === "string" ? message : message?.text || message?.message || "").trim();
+          if (!text) return;
+          heardAudioRef.current = true;
+          setVoiceLog((prev) => [...prev, text]);
+          if (text.includes(completionPhrase)) {
+            handleCompletion().finally(() => stopVoice());
           }
+
         }
       });
 
-      sessionRef.current = session;
-      isSessionOpenRef.current = true;
-      setVoiceStatus("Listening...");
-      voiceStartAtRef.current = Date.now();
+      conversationRef.current = conversation;
 
-      if (!audioContextRef.current) {
+      // In parallel with the agent session, capture mic audio and send utterances to ElevenLabs STT
+      // so we have a JSON log of what the user said.
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        sttStreamRef.current = stream;
+
         const audioContext = new AudioContext();
-        audioContextRef.current = audioContext;
+        sttAudioContextRef.current = audioContext;
         if (audioContext.state === "suspended") {
           await audioContext.resume();
         }
+
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        const drainQueue = async () => {
+          if (sttInFlightRef.current) return;
+          const next = sttQueueRef.current.shift();
+          if (!next) return;
+          sttInFlightRef.current = true;
+
+          try {
+            const wavBlob = pcm16ToWavBlob(next, 16000);
+            const form = new FormData();
+            form.append("file", wavBlob, "utterance.wav");
+            form.append("model_id", "scribe_v2");
+            form.append("session_id", checkinIdRef.current);
+            form.append("role", "user");
+            form.append("user_email", authUser?.email || "");
+            form.append("checkin_id", checkinIdRef.current);
+
+            const res = await fetch(`${apiBase}/stt/elevenlabs/log`, { method: "POST", body: form });
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+              const message = (data && (data.detail || data.message)) || `${res.status} ${res.statusText}`;
+              throw new Error(message);
+            }
+
+            const text = (data?.text || "").trim();
+            const path = data?.path || "";
+            if (text) {
+              setVoiceLog((prev) => [...prev, `[You] ${text}`]);
+            }
+            if (path && !sttPathRef.current) {
+              sttPathRef.current = path;
+              setVoiceLog((prev) => [...prev, `Saved STT JSON: ${path}`]);
+            }
+          } catch (err) {
+            setVoiceLog((prev) => [...prev, `[STT error] ${err?.message || "Transcription failed"}`]);
+          } finally {
+            sttInFlightRef.current = false;
+            // Continue draining if more utterances queued.
+            if (sttQueueRef.current.length) {
+              drainQueue();
+            }
+          }
+        };
+
+        processor.onaudioprocess = (event) => {
+          if (!isSessionOpenRef.current) return;
+          const input = event.inputBuffer.getChannelData(0);
+
+          let rms = 0;
+          for (let i = 0; i < input.length; i += 1) {
+            rms += input[i] * input[i];
+          }
+          rms = Math.sqrt(rms / input.length);
+
+          const speakingNow = rms > 0.01;
+          const resampled = resampleTo16k(input, audioContext.sampleRate);
+          const pcm16 = floatToInt16(resampled);
+
+          if (speakingNow) {
+            if (!sttCollectingRef.current) {
+              sttCollectingRef.current = true;
+              sttSilenceFramesRef.current = 0;
+              sttChunksRef.current = [];
+            }
+            sttChunksRef.current.push(pcm16);
+          } else if (sttCollectingRef.current) {
+            sttSilenceFramesRef.current += 1;
+            if (sttSilenceFramesRef.current >= 3) {
+              sttCollectingRef.current = false;
+              sttSilenceFramesRef.current = 0;
+              const merged = concatInt16(sttChunksRef.current);
+              sttChunksRef.current = [];
+
+              // Skip tiny clips (< ~350ms at 16k).
+              if (merged.length >= 16000 * 0.35) {
+                sttQueueRef.current.push(merged);
+                drainQueue();
+              }
+            }
+          }
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+        sttProcessorRef.current = processor;
+      } catch (err) {
+        // Agent can still run even if STT logging fails.
+        setVoiceLog((prev) => [...prev, `[STT setup error] ${err?.message || "Unable to start STT logging"}`]);
       }
 
-      session.sendRealtimeInput({
-        text: "Please ask the user to look at their camera for 10 seconds and wait for my 'camera done' signal before asking questions."
-      });
-
+      // Camera clip is still handled by our app (separate from the voice agent).
       try {
         const videoBlob = await captureCameraClip();
         await uploadCameraClip(checkinIdRef.current, videoBlob);
@@ -527,118 +581,11 @@ export default function App() {
         setVoiceLog((prev) => [...prev, error?.message || "Camera capture failed."]);
       }
 
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = false;
-        recognition.lang = "en-US";
-        recognition.onresult = (event) => {
-          const result = event.results[event.results.length - 1];
-          if (!result?.isFinal) return;
-          const transcript = result[0]?.transcript?.trim();
-          if (!transcript) return;
-          const idx = currentQuestionIndexRef.current;
-          const response = responsesRef.current[idx];
-          responsesRef.current[idx] = {
-            ...response,
-            transcript,
-            answer: normalizeAnswer(idx, transcript)
-          };
-          console.log("[User] Transcript", transcript);
-        };
-        recognition.onerror = (event) => {
-          console.warn("[User] Speech recognition error", event?.error);
-        };
-        recognition.start();
-        recognitionRef.current = recognition;
-      } else {
-        console.warn("[User] Speech recognition not supported in this browser.");
-      }
-
-      completionTimerRef.current = setInterval(() => {
-        if (!heardAudioRef.current || completionSentRef.current) {
-          return;
-        }
-        const lastAudioAt = lastAudioAtRef.current;
-        if (!lastAudioAt) return;
-        const idleMs = Date.now() - lastAudioAt;
-        const startedAt = voiceStartAtRef.current ?? 0;
-        const sessionMs = Date.now() - startedAt;
-        const lastAiAt = lastAiAudioAtRef.current;
-        const aiIdleMs = lastAiAt ? Date.now() - lastAiAt : 0;
-        if (aiTurnCountRef.current >= 4 && idleMs >= 4000 && aiIdleMs >= 4000 && sessionMs >= 15000) {
-          completionSentRef.current = true;
-          console.log("[Live AI] Silence detected. Posting screening payload.");
-          handleCompletion().finally(() => {
-            stopVoice();
-          });
-        }
-      }, 500);
-
+      // Hint to the agent that camera capture is complete.
       try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          micStreamRef.current = stream;
-
-        const audioContext = audioContextRef.current;
-        if (!audioContext) {
-          throw new Error("Audio context missing");
-        }
-
-        const source = audioContext.createMediaStreamSource(stream);
-        const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-        processor.onaudioprocess = (event) => {
-          if (!isSessionOpenRef.current || sessionRef.current !== session) {
-            return;
-          }
-          const input = event.inputBuffer.getChannelData(0);
-          let rms = 0;
-          for (let i = 0; i < input.length; i += 1) {
-            rms += input[i] * input[i];
-          }
-          rms = Math.sqrt(rms / input.length);
-          if (rms > 0.01) {
-            lastUserAudioAtRef.current = Date.now();
-            if (!userSpeakingRef.current) {
-              userSpeakingRef.current = true;
-              userSpeechStartRef.current = Date.now();
-              console.log("[User] Speech started");
-            }
-          } else if (userSpeakingRef.current) {
-            userSpeakingRef.current = false;
-            const startedAt = userSpeechStartRef.current ?? Date.now();
-            const durationMs = Date.now() - startedAt;
-            console.log("[User] Speech ended", `${Math.round(durationMs / 100) / 10}s`);
-            userSpeechStartRef.current = null;
-          }
-          const resampled = resampleTo16k(input, audioContext.sampleRate);
-          const pcm16 = floatToInt16(resampled);
-          const base64Audio = encodeToBase64(pcm16);
-          session.sendRealtimeInput({
-            audio: {
-              data: base64Audio,
-              mimeType: "audio/pcm;rate=16000"
-            }
-          });
-        };
-
-        source.connect(processor);
-        processor.connect(audioContext.destination);
-        processorRef.current = processor;
-
-        setTimeout(() => {
-          if (!isSessionOpenRef.current || sessionRef.current !== session) {
-            return;
-          }
-          session.sendRealtimeInput({
-            text: "Camera done. Begin the screening questions now."
-          });
-        }, 200);
-      } catch (error) {
-        setVoiceStatus("Error");
-        setVoiceLog((prev) => [...prev, error?.message || "Mic setup failed."]);
-        stopVoice();
+        await conversation.sendUserMessage("Camera done. Begin the screening questions now.");
+      } catch {
+        // ignore
       }
     } catch (error) {
       setVoiceStatus("Error");
