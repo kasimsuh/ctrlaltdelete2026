@@ -5,10 +5,15 @@ import CompletionScreen from "./checkin/CompletionScreen.jsx";
 
 const CAMERA_DONE_STATUSES = new Set(["Recorded", "Uploading...", "Error"]);
 const FACE_CAPTURE_MS = 10000;
-const PAGE_SHELL_CLASS = "min-h-screen bg-[#f3f0ea] px-3 py-2 text-[#1d1b19] sm:px-4 sm:py-3";
+const PAGE_SHELL_CLASS =
+  "min-h-screen bg-[#f3f0ea] px-3 py-2 text-[#1d1b19] sm:px-4 sm:py-3";
 
 function HeaderBar({ authUser, logout }) {
-  const displayName = [authUser?.firstName, authUser?.lastName].filter(Boolean).join(" ").trim() || "there";
+  const displayName =
+    [authUser?.firstName, authUser?.lastName]
+      .filter(Boolean)
+      .join(" ")
+      .trim() || "there";
 
   return (
     <div className="flex items-center justify-between rounded-full border border-[#e8e2d8] bg-[#f7f7f7] px-4 py-2 text-sm text-stone-700">
@@ -18,8 +23,9 @@ function HeaderBar({ authUser, logout }) {
           alt="SeniCare logo"
           className="h-8 w-8 rounded-full object-cover"
         />
-        <span className="font-medium">
-          <span className="font-semibold text-stone-900">Welcome,</span> {displayName}!
+        <span className="text-base font-medium">
+          <span className="font-semibold text-stone-900">Welcome,</span>{" "}
+          {displayName}!
         </span>
       </div>
       <button
@@ -41,6 +47,8 @@ function HeroStage({
   timerDone,
   isFaceScanActive,
 }) {
+  const showVideoPlaceholder = !showMascot && !isFaceScanActive;
+
   return (
     <div className="w-full rounded-[22px] border border-[#e8e2d8] bg-[#f7f7f7] p-3 shadow-[0_12px_24px_rgba(44,39,34,0.08)] sm:p-4">
       <div className="relative aspect-video overflow-hidden rounded-2xl border border-[#ddd3c6] bg-[#ece7de]">
@@ -53,8 +61,23 @@ function HeroStage({
             />
           </div>
         ) : (
-          <video ref={cameraVideoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
+          <video
+            ref={cameraVideoRef}
+            autoPlay
+            muted
+            playsInline
+            className="h-full w-full object-cover"
+          />
         )}
+        {showVideoPlaceholder ? (
+          <div className="absolute inset-0 grid place-items-center bg-[radial-gradient(circle_at_top,_#f8efe1_0%,_#efe4d3_100%)] p-6">
+            <img
+              src="/senicarelogo.png"
+              alt="SeniCare logo"
+              className="h-full max-h-64 w-auto rounded-2xl object-contain shadow-[0_10px_20px_rgba(44,39,34,0.12)]"
+            />
+          </div>
+        ) : null}
         {isRunning ? (
           <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[rgba(26,23,20,0.65)] to-transparent p-4">
             <div className="h-2.5 w-full overflow-hidden rounded-full bg-[#f0e6d8]">
@@ -108,8 +131,14 @@ function ActionRow({
 }
 
 export default function SeniorCheckin({ authUser, authToken, logout }) {
-  const { isVoiceLive, isCheckinComplete, cameraStatus, cameraVideoRef, startVoice, stopVoice } =
-    useCheckin(authUser, authToken);
+  const {
+    isVoiceLive,
+    isCheckinComplete,
+    cameraStatus,
+    cameraVideoRef,
+    startVoice,
+    stopVoice,
+  } = useCheckin(authUser, authToken);
   const [phase, setPhase] = useState("idle");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [timerDone, setTimerDone] = useState(false);
@@ -147,7 +176,10 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
     clearRunTimers();
     intervalRef.current = window.setInterval(() => {
       if (!runStartAtRef.current) return;
-      const elapsed = Math.min(Date.now() - runStartAtRef.current, FACE_CAPTURE_MS);
+      const elapsed = Math.min(
+        Date.now() - runStartAtRef.current,
+        FACE_CAPTURE_MS,
+      );
       setElapsedMs(elapsed);
     }, 100);
     timeoutRef.current = window.setTimeout(() => {
@@ -236,7 +268,9 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
     startLockRef.current = false;
   };
 
-  const progressPercent = Math.round((Math.min(elapsedMs, FACE_CAPTURE_MS) / FACE_CAPTURE_MS) * 100);
+  const progressPercent = Math.round(
+    (Math.min(elapsedMs, FACE_CAPTURE_MS) / FACE_CAPTURE_MS) * 100,
+  );
   const isRunning = phase === "running";
   const showMascot = phase === "mascot";
   const isComplete = phase === "complete";
@@ -275,11 +309,15 @@ export default function SeniorCheckin({ authUser, authToken, logout }) {
                     ? "Running..."
                     : "Start Check-In"
             }
-            secondaryLabel={isVoiceLive || isRunning ? "Stop Session" : "Show Camera"}
+            secondaryLabel={
+              isVoiceLive || isRunning ? "Stop Session" : "Show Camera"
+            }
           />
 
           {permissionError ? (
-            <p className="text-center text-sm font-medium text-rose-700">{permissionError}</p>
+            <p className="text-center text-sm font-medium text-rose-700">
+              {permissionError}
+            </p>
           ) : null}
         </section>
       </main>
