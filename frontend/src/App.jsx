@@ -406,9 +406,23 @@ export default function App() {
       body: formData
     });
     if (!response.ok) {
-      throw new Error("Failed to upload camera clip");
+      let detail = "Failed to upload camera clip";
+      try {
+        const payload = await response.json();
+        if (payload?.detail) detail = String(payload.detail);
+      } catch {
+        // Keep default detail when response body is not JSON.
+      }
+      throw new Error(detail);
     }
     const data = await response.json();
+    if (!data?.vhr) {
+      const checkinResponse = await fetch(`${apiBase}/checkins/${checkinId}`);
+      if (checkinResponse.ok) {
+        const checkinData = await checkinResponse.json();
+        data.vhr = checkinData?.vhr ?? null;
+      }
+    }
     setVhrResult(data?.vhr || null);
     setCameraStatus("Uploaded");
   };
@@ -899,17 +913,19 @@ export default function App() {
                 {isVoiceLive ? `Voice status: ${voiceStatus}` : "Start the live voice assistant to begin."}
               </p>
               <p className="mt-1 text-xs text-stone-500">Camera status: {cameraStatus}</p>
-              {vhrResult ? (
-                <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-3 text-xs text-emerald-900">
-                  <p>
-                    Estimated HR:{" "}
-                    {typeof vhrResult.avg_hr_bpm === "number" ? `${vhrResult.avg_hr_bpm} bpm` : "Unavailable"}
-                    {" · "}
-                    Quality: {vhrResult.hr_quality || "low"}
-                  </p>
-                  {vhrResult.note ? <p className="mt-1 text-emerald-800">{vhrResult.note}</p> : null}
-                </div>
-              ) : null}
+              <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-3 text-xs text-emerald-900">
+                <p>
+                  Estimated HR:{" "}
+                  {typeof vhrResult?.avg_hr_bpm === "number"
+                    ? `${vhrResult.avg_hr_bpm} bpm`
+                    : cameraStatus === "Uploading..." || cameraStatus === "Recorded"
+                      ? "Processing..."
+                      : "Unavailable"}
+                  {" · "}
+                  Quality: {vhrResult?.hr_quality || "low"}
+                </p>
+                {vhrResult?.note ? <p className="mt-1 text-emerald-800">{vhrResult.note}</p> : null}
+              </div>
               <div className="mt-4 flex flex-wrap gap-3">
                 <button
                   className="rounded-xl border border-amber-200 px-4 py-2 text-sm text-stone-700"
