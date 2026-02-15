@@ -21,6 +21,7 @@ import {
 } from "../lib/screening.js";
 
 const apiBase = API_BASE;
+const FACE_CAPTURE_BUFFER_MS = 6500;
 
 export default function useCheckin(authUser, authToken) {
   const [status, setStatus] = useState(null);
@@ -29,6 +30,7 @@ export default function useCheckin(authUser, authToken) {
   const [voiceStatus, setVoiceStatus] = useState("Idle");
   const [voiceLog, setVoiceLog] = useState([]);
   const [isVoiceLive, setIsVoiceLive] = useState(false);
+  const [isCheckinComplete, setIsCheckinComplete] = useState(false);
   const [cameraStatus, setCameraStatus] = useState("Idle");
   const [facialSymmetryStatus, setFacialSymmetryStatus] = useState("Not run");
   const [facialSymmetryReason, setFacialSymmetryReason] = useState(
@@ -60,10 +62,31 @@ export default function useCheckin(authUser, authToken) {
   const userSpeakingRef = useRef(false);
   const userSpeechStartRef = useRef(null);
   const currentQuestionIndexRef = useRef(0);
-  const responsesRef = useRef(
-    INITIAL_RESPONSES.map((item) => ({ ...item })),
-  );
+  const responsesRef = useRef(INITIAL_RESPONSES.map((item) => ({ ...item })));
   const recognitionRef = useRef(null);
+
+  const getResponseErrorMessage = async (response, fallbackMessage) => {
+    try {
+      const payload = await response.json();
+      const detail = payload?.detail;
+      if (typeof detail === "string" && detail.trim()) {
+        return detail;
+      }
+      if (
+        detail &&
+        typeof detail === "object" &&
+        typeof detail.message === "string"
+      ) {
+        return detail.message;
+      }
+      if (typeof payload?.message === "string" && payload.message.trim()) {
+        return payload.message;
+      }
+    } catch {
+      // Ignore parse errors and fall back to default message.
+    }
+    return fallbackMessage;
+  };
 
   const startCheckin = async () => {
     setStatus("Starting");
@@ -187,7 +210,7 @@ export default function useCheckin(authUser, authToken) {
       responses,
     };
 
-    await fetch(`${apiBase}/screenings`, {
+    const screeningResponse = await fetch(`${apiBase}/screenings`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -195,6 +218,12 @@ export default function useCheckin(authUser, authToken) {
       },
       body: JSON.stringify(screeningData),
     });
+    if (!screeningResponse.ok) {
+      setVoiceLog((prev) => [
+        ...prev,
+        "Warning: Screening data could not be stored.",
+      ]);
+    }
 
     if (!checkinIdRef.current) return;
 
@@ -206,7 +235,9 @@ export default function useCheckin(authUser, authToken) {
     const answers = {
       dizziness:
         parsedSymptoms.dizziness ||
-        (symptomAnswer === true && !parsedSymptoms.chest_pain && !parsedSymptoms.trouble_breathing),
+        (symptomAnswer === true &&
+          !parsedSymptoms.chest_pain &&
+          !parsedSymptoms.trouble_breathing),
       chest_pain: parsedSymptoms.chest_pain,
       trouble_breathing: parsedSymptoms.trouble_breathing,
       medication_taken: responses[2]?.answer ?? null,
@@ -214,14 +245,77 @@ export default function useCheckin(authUser, authToken) {
 
     const transcript = buildTranscript(responses);
 
-    await fetch(`${apiBase}/checkins/${checkinIdRef.current}/complete`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    const completeResponse = await fetch(
+      `${apiBase}/checkins/${checkinIdRef.current}/complete`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({ answers, transcript }),
       },
-      body: JSON.stringify({ answers, transcript }),
-    });
+    );
+    if (!completeResponse.ok) {
+      const completionError = await getResponseErrorMessage(
+        completeResponse,
+        "Failed to complete check-in",
+      );
+      setVoiceLog((prev) => [
+        ...prev,
+        `Completion validation failed: ${completionError}`,
+      ]);
+
+      const autoCompleteResponse = await fetch(
+        `${apiBase}/checkins/${checkinIdRef.current}/auto-complete`,
+        {
+          method: "POST",
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+        },
+      );
+
+      if (!autoCompleteResponse.ok) {
+        const autoCompleteError = await getResponseErrorMessage(
+          autoCompleteResponse,
+          "Auto-complete fallback failed",
+        );
+        throw new Error(autoCompleteError);
+      }
+
+      const detailResponse = await fetch(
+        `${apiBase}/checkins/${checkinIdRef.current}`,
+        {
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+        },
+      );
+
+      if (detailResponse.ok) {
+        const detail = await detailResponse.json();
+        const triageReasons = Array.isArray(detail?.triage_reasons)
+          ? detail.triage_reasons
+          : [];
+        setStatus(detail?.triage_status || "Completed");
+        setReason(
+          triageReasons.length
+            ? triageReasons.join("; ")
+            : "Check-in completed successfully.",
+        );
+      } else {
+        setStatus("Completed");
+        setReason("Check-in completed successfully.");
+      }
+      setIsCheckinComplete(true);
+      return null;
+    }
+    const result = await completeResponse.json();
+    setStatus(result?.triage_status || "Completed");
+    setReason(
+      Array.isArray(result?.triage_reasons) && result.triage_reasons.length
+        ? result.triage_reasons.join("; ")
+        : "Check-in completed successfully.",
+    );
+    setIsCheckinComplete(true);
+    return result;
   };
 
   const maybePromptCompletion = (session) => {
@@ -337,6 +431,13 @@ export default function useCheckin(authUser, authToken) {
   const startVoice = async () => {
     if (isVoiceLive) return;
 
+    setIsCheckinComplete(false);
+    let resolveFirstPromptAudio = null;
+    let firstPromptAudioStarted = false;
+    const firstPromptAudioPromise = new Promise((resolve) => {
+      resolveFirstPromptAudio = resolve;
+    });
+
     setIsVoiceLive(true);
     setVoiceStatus("Connecting...");
     setVoiceLog([]);
@@ -385,6 +486,10 @@ export default function useCheckin(authUser, authToken) {
                   const audioContext = audioContextRef.current;
                   if (!audioContext) return;
                   const pcm = decodeBase64ToInt16(part.inlineData.data);
+                  if (!firstPromptAudioStarted) {
+                    firstPromptAudioStarted = true;
+                    resolveFirstPromptAudio?.();
+                  }
                   lastAudioAtRef.current = Date.now();
                   lastAiAudioAtRef.current = Date.now();
                   if (
@@ -416,13 +521,27 @@ export default function useCheckin(authUser, authToken) {
                 if (part.text) {
                   console.log("[Live AI]", part.text);
                   setVoiceLog((prev) => [...prev, part.text]);
-                  if (part.text.includes(completionPhrase)) {
+                  if (
+                    !completionSentRef.current &&
+                    part.text
+                      .toLowerCase()
+                      .includes(completionPhrase.toLowerCase())
+                  ) {
+                    completionSentRef.current = true;
                     console.log(
                       "[Live AI] Completion phrase detected. Posting screening payload.",
                     );
-                    handleCompletion().finally(() => {
-                      stopVoice();
-                    });
+                    handleCompletion()
+                      .catch((error) => {
+                        setVoiceStatus("Error");
+                        setVoiceLog((prev) => [
+                          ...prev,
+                          error?.message || "Check-in completion failed.",
+                        ]);
+                      })
+                      .finally(() => {
+                        stopVoice();
+                      });
                   }
                 }
               });
@@ -472,6 +591,18 @@ export default function useCheckin(authUser, authToken) {
       }, 3500);
 
       try {
+        await Promise.race([
+          firstPromptAudioPromise,
+          new Promise((resolve) => {
+            setTimeout(resolve, 5000);
+          }),
+        ]);
+        await new Promise((resolve) => {
+          setTimeout(resolve, FACE_CAPTURE_BUFFER_MS);
+        });
+        if (!isSessionOpenRef.current || sessionRef.current !== session) {
+          throw new Error("Session closed before camera capture.");
+        }
         const videoBlob = await captureCameraClip();
         const uploadResult = await uploadCameraClip(
           checkinIdRef.current,
@@ -579,14 +710,26 @@ export default function useCheckin(authUser, authToken) {
             console.log(
               "[Live AI] Final message window elapsed. Posting screening payload.",
             );
-            handleCompletion().finally(() => {
-              stopVoice();
-            });
+            handleCompletion()
+              .catch((error) => {
+                setVoiceStatus("Error");
+                setVoiceLog((prev) => [
+                  ...prev,
+                  error?.message || "Check-in completion failed.",
+                ]);
+              })
+              .finally(() => {
+                stopVoice();
+              });
           }
           return;
         }
 
-        if (aiTurnCountRef.current >= 4 && idleMs >= 6000 && sessionMs >= 18000) {
+        if (
+          aiTurnCountRef.current >= 4 &&
+          idleMs >= 6000 &&
+          sessionMs >= 18000
+        ) {
           maybePromptCompletion(session);
         }
       }, 500);
@@ -675,6 +818,7 @@ export default function useCheckin(authUser, authToken) {
     voiceStatus,
     voiceLog,
     isVoiceLive,
+    isCheckinComplete,
     cameraStatus,
     facialSymmetryStatus,
     facialSymmetryReason,
