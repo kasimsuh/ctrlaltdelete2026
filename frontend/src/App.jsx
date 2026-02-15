@@ -21,5 +21,5 @@ export default function App() {
     );
   }
 
-  return <SeniorCheckin authUser={authUser} logout={logout} />;
+  return <SeniorCheckin authUser={authUser} authToken={authToken} logout={logout} />;
 }

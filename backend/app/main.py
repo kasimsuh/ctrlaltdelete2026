@@ -59,8 +59,7 @@ class TriageStatus(str, Enum):
 
 
 class CheckinStartRequest(BaseModel):
-    demo_mode: bool = True
-    senior_id: str = "demo-senior"
+    pass
 
 
 class CheckinStartResponse(BaseModel):
@@ -175,7 +174,7 @@ class AlertChannel(str, Enum):
 
 
 class AlertRequest(BaseModel):
-    senior_id: str = "demo-senior"
+    senior_id: str
     level: AlertLevel
     channel: AlertChannel
     target: str
@@ -208,7 +207,6 @@ class ScreeningSession(BaseModel):
 
 class ScreeningCreateRequest(BaseModel):
     session_id: Optional[str] = None
-    senior_id: str = "demo-senior"
     checkin_id: Optional[str] = None
     timestamp: Optional[datetime] = None
     responses: List[ScreeningResponseItem]
@@ -298,55 +296,6 @@ def _parse_object_id(value: Optional[str]) -> Optional[ObjectId]:
         return ObjectId(value)
     except Exception:
         return None
-
-
-def _get_or_create_demo_user() -> dict:
-    users = _users_collection()
-    email = os.environ.get("DEMO_USER_EMAIL", "demo-senior@example.com")
-    existing = users.find_one({"email": email})
-    if existing:
-        return existing
-
-    doc = {
-        "email": email,
-        "password_hash": hash_password("demo-password"),
-        "firstName": "Demo",
-        "lastName": "Senior",
-        "name": "Demo Senior",
-        "role": "senior",
-        "created_at": datetime.now(timezone.utc),
-        "is_active": True,
-    }
-    res = users.insert_one(doc)
-    doc["_id"] = res.inserted_id
-    return doc
-
-
-def _resolve_senior_user(
-    *,
-    senior_id: Optional[str],
-    current_user: Optional[dict],
-    demo_mode: bool,
-) -> dict:
-    if current_user is not None:
-        return current_user
-
-    if demo_mode or not senior_id:
-        return _get_or_create_demo_user()
-
-    users = _users_collection()
-    object_id = _parse_object_id(senior_id)
-    if object_id is not None:
-        found = users.find_one({"_id": object_id})
-        if found:
-            return found
-
-    if "@" in senior_id:
-        found = users.find_one({"email": senior_id.strip().lower()})
-        if found:
-            return found
-
-    return _get_or_create_demo_user()
 
 
 def _parse_duration_ms(metadata: Optional[str]) -> int:
@@ -706,7 +655,9 @@ def _load_checkin(checkin_id: str) -> Optional[Dict[str, object]]:
 @app.get("/dashboard/analytics")
 def dashboard_analytics(user: Optional[dict] = Depends(require_current_user)):
     _require_doctor(user)
-    return get_dashboard_analytics(days=7)
+    analytics = get_dashboard_analytics(days=7)
+    print(f"[DASHBOARD] Analytics loaded for doctor {user.get('email')}: {analytics}")
+    return analytics
 
 
 @app.get("/dashboard/seniors")
@@ -716,21 +667,26 @@ def dashboard_seniors(user: Optional[dict] = Depends(require_current_user)):
     user_ids = [senior["_id"] for senior in seniors]
     latest_checkins = get_latest_checkins(user_ids)
 
+    print(f"[DASHBOARD] Fetching seniors list for doctor {user.get('email')}")
+    print(f"[DASHBOARD] Total seniors: {len(seniors)}")
+
     response_items = []
     for senior in seniors:
         last_checkin = latest_checkins.get(senior["_id"])
-        response_items.append(
-            {
-                "id": str(senior["_id"]),
-                "firstName": senior.get("firstName", ""),
-                "lastName": senior.get("lastName", ""),
-                "email": senior.get("email", ""),
-                "lastCheckinAt": _serialize_dt(last_checkin.get("completed_at")) if last_checkin else None,
-                "triageStatus": (last_checkin.get("triage_status") if last_checkin else None),
-                "checkinId": (last_checkin.get("checkin_id") if last_checkin else None),
-            }
-        )
+        item = {
+            "id": str(senior["_id"]),
+            "firstName": senior.get("firstName", ""),
+            "lastName": senior.get("lastName", ""),
+            "email": senior.get("email", ""),
+            "lastCheckinAt": _serialize_dt(last_checkin.get("completed_at")) if last_checkin else None,
+            "triageStatus": (last_checkin.get("triage_status") if last_checkin else None),
+            "checkinId": (last_checkin.get("checkin_id") if last_checkin else None),
+        }
+        response_items.append(item)
+        if last_checkin:
+            print(f"  {senior.get('firstName')} {senior.get('lastName')}: {last_checkin.get('triage_status')} (completed: {last_checkin.get('completed_at')})")
 
+    print(f"[DASHBOARD] Returning {len(response_items)} seniors")
     return {"seniors": response_items}
 
 
@@ -774,13 +730,12 @@ def start_checkin(
     payload: CheckinStartRequest,
     user: Optional[dict] = Depends(require_current_user),
 ) -> CheckinStartResponse:
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required to start check-in")
+    
     checkin_id = str(uuid4())
     started_at = datetime.now(timezone.utc)
-    senior_user = _resolve_senior_user(
-        senior_id=payload.senior_id,
-        current_user=user,
-        demo_mode=payload.demo_mode,
-    )
+    senior_user = user
 
     checkin_doc = {
         "user_id": senior_user["_id"],
@@ -808,8 +763,8 @@ def start_checkin(
     _checkins_collection().insert_one(checkin_doc)
 
     CHECKINS[checkin_id] = {
-        "senior_id": payload.senior_id,
-        "demo_mode": payload.demo_mode,
+        "senior_id": str(senior_user["_id"]),
+        "demo_mode": False,
         "started_at": started_at,
         "status": "in_progress",
         "user_id": senior_user["_id"],
@@ -960,13 +915,13 @@ def list_checkins(
 ) -> CheckinListResponse:
     items: List[CheckinDetail] = []
 
-    senior_user = _resolve_senior_user(
-        senior_id=senior_id,
-        current_user=None,
-        demo_mode=(senior_id == "demo-senior"),
-    )
+    # Parse senior_id as ObjectId
+    try:
+        user_id = ObjectId(senior_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid senior_id format")
 
-    query: Dict[str, Any] = {"user_id": senior_user.get("_id")}
+    query: Dict[str, Any] = {"user_id": user_id}
     if from_date or to_date:
         date_filter: Dict[str, Any] = {}
         if from_date:
@@ -1059,11 +1014,21 @@ def list_alerts(senior_id: str) -> List[AlertResponse]:
 
 @app.post("/screenings", response_model=ScreeningCreateResponse)
 def create_screening(payload: ScreeningCreateRequest) -> ScreeningCreateResponse:
+    if not payload.checkin_id:
+        raise HTTPException(status_code=400, detail="checkin_id is required")
+    
     session_id = payload.session_id or f"screening-{uuid4()}"
     timestamp = payload.timestamp or datetime.utcnow()
+    
+    # Get checkin to find the user
+    checkin_doc = _checkins_collection().find_one({"checkin_id": payload.checkin_id})
+    if not checkin_doc:
+        raise HTTPException(status_code=404, detail="Check-in not found")
+    
+    senior_id = str(checkin_doc.get("user_id", ""))
     session = ScreeningSession(
         session_id=session_id,
-        senior_id=payload.senior_id,
+        senior_id=senior_id,
         checkin_id=payload.checkin_id,
         timestamp=timestamp,
         responses=payload.responses,
@@ -1073,7 +1038,7 @@ def create_screening(payload: ScreeningCreateRequest) -> ScreeningCreateResponse
     _screenings_collection().insert_one(
         {
             "session_id": session_id,
-            "senior_id": payload.senior_id,
+            "senior_id": senior_id,
             "checkin_id": payload.checkin_id,
             "timestamp": timestamp,
             "responses": [item.model_dump() for item in payload.responses],

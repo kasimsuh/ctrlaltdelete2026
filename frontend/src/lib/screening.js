@@ -70,3 +70,25 @@ export const normalizeAnswer = (questionIndex, text) => {
 
   return null;
 };
+
+export const parseSymptomTranscript = (text) => {
+  if (!text) return { dizziness: false, chest_pain: false, trouble_breathing: false };
+  const lower = text.toLowerCase();
+  return {
+    dizziness: lower.includes("dizz"),
+    chest_pain: lower.includes("chest"),
+    trouble_breathing:
+      lower.includes("breath") || lower.includes("breathing") || lower.includes("shortness"),
+  };
+};
+
+export const buildTranscript = (responses) =>
+  responses
+    .map((item) => {
+      const parts = [];
+      if (item?.q) parts.push(`AI: ${item.q}`);
+      if (item?.transcript) parts.push(`USER: ${item.transcript}`);
+      return parts.join(" ");
+    })
+    .filter(Boolean)
+    .join(" ");
