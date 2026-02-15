@@ -1,9 +1,21 @@
+# Python envs/caches
+.venv/
+backend/.venv/
+__pycache__/
+.pycache/
+
+# macOS
 .DS_Store
+
+# Node build/deps
 node_modules/
 frontend/dist/
-backend/.venv/
+backend/voice/node_modules/
+
+# Python runtime cache in backend
 backend/__pycache__/
 backend/app/__pycache__/
-backend/voice/node_modules/
+
+# Local env files
 backend/voice/.env
 .env

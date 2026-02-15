@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Optional
 from urllib.parse import quote_plus, urlsplit
@@ -91,3 +92,69 @@ def mongo_check() -> tuple[bool, dict, Optional[str]]:
     except Exception as e:
         # Avoid returning secrets; exception messages typically do not include creds.
         return False, summary, f"{e.__class__.__name__}: {e}"
+
+
+def get_database():
+    client = get_mongo_client()
+    try:
+        db = client.get_default_database()
+    except Exception:
+        db = None
+    if db is None:
+        db_name = os.environ.get("MONGO_DB", "guardian")
+        db = client[db_name]
+    return db
+
+
+def get_senior_users(limit: int = 50) -> list[dict]:
+    db = get_database()
+    return list(db["users"].find({"role": "senior"}).sort("created_at", -1).limit(limit))
+
+
+def get_latest_checkins(user_ids: list) -> dict:
+    if not user_ids:
+        return {}
+    db = get_database()
+    pipeline = [
+        {"$match": {"user_id": {"$in": user_ids}}},
+        {"$sort": {"completed_at": -1}},
+        {
+            "$group": {
+                "_id": "$user_id",
+                "latest": {"$first": "$$ROOT"}
+            }
+        }
+    ]
+    results = db["checkin_history"].aggregate(pipeline)
+    latest_by_user = {}
+    for item in results:
+        latest_by_user[item["_id"]] = item.get("latest")
+    return latest_by_user
+
+
+def get_dashboard_analytics(days: int = 7) -> dict:
+    db = get_database()
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    pipeline = [
+        {"$match": {"completed_at": {"$gte": cutoff}}},
+        {"$group": {"_id": "$triage_status", "count": {"$sum": 1}}}
+    ]
+    triage_counts = {"green": 0, "yellow": 0, "red": 0}
+    for row in db["checkin_history"].aggregate(pipeline):
+        status = (row.get("_id") or "").lower()
+        if status in triage_counts:
+            triage_counts[status] = row.get("count", 0)
+
+    senior_count = db["users"].count_documents({"role": "senior"})
+    total_checkins = sum(triage_counts.values())
+    alerts = triage_counts["yellow"] + triage_counts["red"]
+
+    return {
+        "total_seniors": senior_count,
+        "total_checkins": total_checkins,
+        "green": triage_counts["green"],
+        "yellow": triage_counts["yellow"],
+        "red": triage_counts["red"],
+        "alerts": alerts,
+        "window_days": days
+    }
