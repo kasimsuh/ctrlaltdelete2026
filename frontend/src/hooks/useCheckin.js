@@ -29,6 +29,7 @@ export default function useCheckin(authUser, authToken) {
   const [voiceStatus, setVoiceStatus] = useState("Idle");
   const [voiceLog, setVoiceLog] = useState([]);
   const [isVoiceLive, setIsVoiceLive] = useState(false);
+  const [isCheckinComplete, setIsCheckinComplete] = useState(false);
   const [cameraStatus, setCameraStatus] = useState("Idle");
   const [facialSymmetryStatus, setFacialSymmetryStatus] = useState("Not run");
   const [facialSymmetryReason, setFacialSymmetryReason] = useState(
@@ -214,7 +215,7 @@ export default function useCheckin(authUser, authToken) {
 
     const transcript = buildTranscript(responses);
 
-    await fetch(`${apiBase}/checkins/${checkinIdRef.current}/complete`, {
+    const completeResponse = await fetch(`${apiBase}/checkins/${checkinIdRef.current}/complete`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -222,6 +223,18 @@ export default function useCheckin(authUser, authToken) {
       },
       body: JSON.stringify({ answers, transcript }),
     });
+    if (!completeResponse.ok) {
+      throw new Error("Failed to complete check-in");
+    }
+    const result = await completeResponse.json();
+    setStatus(result?.triage_status || "Completed");
+    setReason(
+      Array.isArray(result?.triage_reasons) && result.triage_reasons.length
+        ? result.triage_reasons.join("; ")
+        : "Check-in completed successfully.",
+    );
+    setIsCheckinComplete(true);
+    return result;
   };
 
   const maybePromptCompletion = (session) => {
@@ -337,6 +350,13 @@ export default function useCheckin(authUser, authToken) {
   const startVoice = async () => {
     if (isVoiceLive) return;
 
+    setIsCheckinComplete(false);
+    let resolveFirstPromptAudio = null;
+    let firstPromptAudioStarted = false;
+    const firstPromptAudioPromise = new Promise((resolve) => {
+      resolveFirstPromptAudio = resolve;
+    });
+
     setIsVoiceLive(true);
     setVoiceStatus("Connecting...");
     setVoiceLog([]);
@@ -385,6 +405,10 @@ export default function useCheckin(authUser, authToken) {
                   const audioContext = audioContextRef.current;
                   if (!audioContext) return;
                   const pcm = decodeBase64ToInt16(part.inlineData.data);
+                  if (!firstPromptAudioStarted) {
+                    firstPromptAudioStarted = true;
+                    resolveFirstPromptAudio?.();
+                  }
                   lastAudioAtRef.current = Date.now();
                   lastAiAudioAtRef.current = Date.now();
                   if (
@@ -472,6 +496,12 @@ export default function useCheckin(authUser, authToken) {
       }, 3500);
 
       try {
+        await Promise.race([
+          firstPromptAudioPromise,
+          new Promise((resolve) => {
+            setTimeout(resolve, 5000);
+          }),
+        ]);
         const videoBlob = await captureCameraClip();
         const uploadResult = await uploadCameraClip(
           checkinIdRef.current,
@@ -675,6 +705,7 @@ export default function useCheckin(authUser, authToken) {
     voiceStatus,
     voiceLog,
     isVoiceLive,
+    isCheckinComplete,
     cameraStatus,
     facialSymmetryStatus,
     facialSymmetryReason,
