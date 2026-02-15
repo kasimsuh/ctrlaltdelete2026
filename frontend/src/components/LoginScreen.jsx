@@ -32,8 +32,8 @@ export default function LoginScreen({ auth }) {
       : "Sign in";
 
   return (
-    <div className="h-[100svh] overflow-hidden bg-[#f3f0ea] px-3 py-2 text-[#1d1b19] sm:px-4 sm:py-3">
-      <main className="mx-auto grid h-full w-full max-w-5xl place-items-center">
+    <div className="login-screen-shell bg-[#f3f0ea] px-3 py-2 text-[#1d1b19] sm:px-4 sm:py-3">
+      <main className="login-screen-main mx-auto w-full max-w-5xl">
         <section className="flex w-full max-w-[560px] flex-col items-center gap-3 sm:gap-3.5">
           <BrandHeader />
           <AuthCard
